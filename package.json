@@ -1,0 +1,30 @@
+{
+  "name": "pi-voice",
+  "version": "0.1.0",
+  "description": "Voice wake-word + speech extension for Pi (macOS).",
+  "type": "module",
+  "engines": {
+    "node": ">=25"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "sherpa-onnx-node": "1.13.8",
+    "ws": "8.22.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.3",
+    "@types/ws": "8.18.2",
+    "typescript": "7.0.2"
+  }
+}

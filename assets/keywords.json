@@ -1,0 +1,16 @@
+{
+  "_note": "BPE token sequences generated against the archive's actual bpe.model (sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/bpe.model). Generation per phrase: python3 -m venv /tmp/spvenv && /tmp/spvenv/bin/pip install sentencepiece && /tmp/spvenv/bin/python -c \"import sentencepiece as spm; sp=spm.SentencePieceProcessor(model_file='bpe.model'); print(' '.join(sp.encode('HEY PI', out_type=str)))\". NOTE: PI is a single BPE token (▁PI), not ▁P I as guessed in early briefs — always regenerate against bpe.model, never hand-write. Runtime keywords file format is bare token sequences, one per line, with NO @phrase or #score suffix (see the archive's test_wavs/test_keywords.txt); lane B maps a detection back to its phrase via the 'phrase' field here. Data only: sensitivity-to-threshold mapping is lane B's job.",
+  "model": "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01",
+  "groups": {
+    "hey-pi": [
+      { "phrase": "HEY PI", "tokens": "▁HE Y ▁PI" },
+      { "phrase": "HEY PIE", "tokens": "▁HE Y ▁PI E" },
+      { "phrase": "HEY PY", "tokens": "▁HE Y ▁P Y" }
+    ],
+    "hi-pi": [
+      { "phrase": "HI PI", "tokens": "▁HI ▁PI" },
+      { "phrase": "HI PIE", "tokens": "▁HI ▁PI E" },
+      { "phrase": "HI PY", "tokens": "▁HI ▁P Y" }
+    ]
+  }
+}
