@@ -65,12 +65,30 @@ export type AvFoundationSourceDeps = {
   /** Called when the saved mic is missing and the default is used instead. */
   onNotice?: (message: string) => void;
   killTimeoutMs?: number;
+  /** No stdout data within this long after start trips the stall watchdog. */
+  startupTimeoutMs?: number;
+  /** Silence after data has flowed trips the stall watchdog. */
+  stallMs?: number;
+  setTimeoutImpl?: (fn: () => void, ms: number) => unknown;
+  clearTimeoutImpl?: (handle: unknown) => void;
 };
 
 /** AudioSource plus the ffmpeg `-i` value actually used (e.g. ":default" or ":2"). */
 export type AvFoundationSource = AudioSource & {
   resolvedInput: string | undefined;
 };
+
+/** Classified microphone failure. All onError paths use this type. */
+export type MicErrorCode = "permission" | "stalled" | "exited" | "spawn" | "device";
+
+export class MicError extends Error {
+  readonly code: MicErrorCode;
+  constructor(code: MicErrorCode, message: string) {
+    super(message);
+    this.name = "MicError";
+    this.code = code;
+  }
+}
 
 function isPermissionError(stderr: string): boolean {
   return /permission|not permitted|tcc|privacy/i.test(stderr);
@@ -90,12 +108,40 @@ export function createAvFoundationSource(
   const spawnImpl = deps?.spawnImpl ?? spawn;
   const onNotice = deps?.onNotice;
   const killTimeoutMs = deps?.killTimeoutMs ?? STOP_KILL_TIMEOUT_MS;
+  const startupTimeoutMs = deps?.startupTimeoutMs ?? 5000;
+  const stallMs = deps?.stallMs ?? 3000;
+  const setTimeoutImpl = deps?.setTimeoutImpl ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
+  const clearTimeoutImpl = deps?.clearTimeoutImpl ?? ((handle: unknown) => clearTimeout(handle as never));
 
   let child: ChildProcess | undefined;
   let stopped = false;
   let leftover: Buffer | undefined;
   let stderrTail = "";
   let resolvedInput: string | undefined;
+  let watchdog: unknown;
+  let errored = false;
+
+  function clearWatchdog(): void {
+    if (watchdog !== undefined) {
+      clearTimeoutImpl(watchdog);
+      watchdog = undefined;
+    }
+  }
+
+  function failStalled(onError: (error: Error) => void, reason: string): void {
+    if (errored || stopped) return;
+    errored = true;
+    clearWatchdog();
+    const proc = child;
+    child = undefined;
+    proc?.removeAllListeners();
+    try {
+      proc?.kill("SIGKILL");
+    } catch {
+      // kill failure is secondary; the MicError below carries the failure
+    }
+    onError(new MicError("stalled", reason));
+  }
 
   async function resolveInput(): Promise<string> {
     if (mic.kind === "default") return ":default";
@@ -114,10 +160,28 @@ export function createAvFoundationSource(
     return `:${found.index}`;
   }
 
-  function permissionError(): Error {
-    return new Error(
+  function permissionError(): MicError {
+    return new MicError(
+      "permission",
       "Microphone access denied. Grant the terminal app Microphone access in " +
         "System Settings > Privacy & Security > Microphone, then restart.",
+    );
+  }
+
+  function isDeviceError(text: string): boolean {
+    return /no such device|device not found|invalid device|unknown device|cannot.*device|no device/i.test(text);
+  }
+
+  function classifyExit(code: number | null, signal: string | null): MicError {
+    if (isPermissionError(stderrTail)) return permissionError();
+    const tail = stderrTail.trim().slice(-500);
+    const suffix = tail ? `: ${tail}` : "";
+    if (isDeviceError(stderrTail)) {
+      return new MicError("device", `Microphone device unavailable (code ${code ?? "unknown"}, signal ${signal ?? "none"})${suffix}`);
+    }
+    return new MicError(
+      "exited",
+      `Microphone process exited (code ${code ?? "unknown"}, signal ${signal ?? "none"})${suffix}`,
     );
   }
 
@@ -132,6 +196,12 @@ export function createAvFoundationSource(
       "-hide_banner",
       "-loglevel",
       "error",
+      "-fflags",
+      "nobuffer",
+      "-probesize",
+      "32",
+      "-analyzeduration",
+      "0",
       "-f",
       "avfoundation",
       "-i",
@@ -145,8 +215,20 @@ export function createAvFoundationSource(
       "pipe:1",
     ]);
     child = proc;
+    stopped = false;
+    errored = false;
+    clearWatchdog();
+    watchdog = setTimeoutImpl(
+      () => failStalled(onError, `Microphone capture stalled: no audio data within ${startupTimeoutMs} ms`),
+      startupTimeoutMs,
+    );
 
     proc.stdout?.on("data", (data: Buffer) => {
+      clearWatchdog();
+      watchdog = setTimeoutImpl(
+        () => failStalled(onError, `Microphone capture stalled: no audio data for ${stallMs} ms`),
+        stallMs,
+      );
       let buf = leftover ? Buffer.concat([leftover, data]) : data;
       leftover = undefined;
       if (buf.length % 2 === 1) {
@@ -159,22 +241,20 @@ export function createAvFoundationSource(
       stderrTail = `${stderrTail}${data.toString("utf8")}`.slice(-2000);
     });
     proc.once("error", (err: Error) => {
+      clearWatchdog();
       if (stopped || proc !== child) return;
       child = undefined;
-      onError(isPermissionError(`${err.message} ${stderrTail}`) ? permissionError() : err);
+      if (errored) return;
+      errored = true;
+      onError(isPermissionError(`${err.message} ${stderrTail}`) ? permissionError() : new MicError("spawn", `Microphone capture failed to start: ${err.message}`));
     });
     proc.once("exit", (code: number | null, signal: string | null) => {
+      clearWatchdog();
       if (stopped || proc !== child) return;
       child = undefined;
-      if (isPermissionError(stderrTail)) {
-        onError(permissionError());
-      } else {
-        onError(
-          new Error(
-            `Microphone process exited (code ${code ?? "unknown"}, signal ${signal ?? "none"}). ${stderrTail.trim()}`.trim(),
-          ),
-        );
-      }
+      if (errored) return;
+      errored = true;
+      onError(classifyExit(code, signal));
     });
     source.resolvedInput = input;
   }
@@ -183,6 +263,7 @@ export function createAvFoundationSource(
     const proc = child;
     child = undefined;
     stopped = true;
+    clearWatchdog();
     if (!proc) return;
     proc.stdout?.removeAllListeners();
     proc.stderr?.removeAllListeners();
