@@ -1,4 +1,4 @@
-import * as WebSocket from "ws";
+import WebSocket from "ws";
 import type { VoiceFailure } from "./contracts.ts";
 
 export const STT_URL =
