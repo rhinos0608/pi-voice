@@ -5,21 +5,15 @@ export const STT_URL =
   "wss://api.elevenlabs.io/v1/speech-to-text/realtime" +
   "?model_id=scribe_v2_realtime" +
   "&audio_format=pcm_16000" +
-  "&commit_strategy=vad" +
-  "&include_timestamps=false" +
-  "&vad_threshold=0.4" +
-  "&vad_silence_threshold_secs=1.5" +
-  "&min_speech_duration_ms=100" +
-  "&min_silence_duration_ms=100";
+  "&commit_strategy=manual" +
+  "&include_timestamps=false";
 
 const SAMPLE_RATE = 16000;
 const CHUNK_BYTES = 8192;
 const CONNECT_BUFFER_BYTES = SAMPLE_RATE * 2 * 2;
 
-const DEFAULT_SILENCE_MS = 1200;
-const DEFAULT_NO_SPEECH_MS = 8000;
 const DEFAULT_CAP_MS = 30000;
-const DEFAULT_CAP_GRACE_MS = 1000;
+const DEFAULT_COMMIT_GRACE_MS = 3000;
 
 /** How an utterance ended. `text` is the joined committed text (blank unless reason is "final"). */
 export type SttEndReason = "final" | "blank" | "error" | "closed";
@@ -27,6 +21,7 @@ export type SttEndReason = "final" | "blank" | "error" | "closed";
 export type SttEndInfo = {
   reason: SttEndReason;
   text: string;
+  source?: "committed" | "partial-fallback";
 };
 
 /** Callbacks for one utterance. `onEnd` always fires exactly once per utterance. */
@@ -35,13 +30,18 @@ export type SttHandlers = {
   onFinal(text: string): void;
   onFailure(f: VoiceFailure): void;
   onEnd?(info: SttEndInfo): void;
+  onSession?(): void;
+  onEvent?(type: string, info?: Record<string, unknown>): void;
 };
 
 /** Minimal socket surface used by the utterance; satisfied by `ws`. */
 export type SttSocket = {
   send(data: string): void;
   close(): void;
-  on(event: "open" | "message" | "close" | "error", listener: (...args: unknown[]) => void): unknown;
+  on(
+    event: "open" | "message" | "close" | "error" | "unexpected-response",
+    listener: (...args: unknown[]) => void,
+  ): unknown;
 };
 
 /** Create a socket for `url` with the given handshake headers. */
@@ -55,15 +55,23 @@ export type SttTimers = {
 
 /** Injectable utterance time limits (milliseconds). */
 export type SttLimits = {
-  silenceMs?: number;
-  noSpeechMs?: number;
   capMs?: number;
-  capGraceMs?: number;
+  commitGraceMs?: number;
 };
 
-/** One capture utterance: feed PCM frames, then close. */
+export type SttOptions = {
+  socketFactory?: SttSocketFactory;
+  timers?: SttTimers;
+  limits?: SttLimits;
+  url?: string;
+  capMs?: number;
+  commitGraceMs?: number;
+};
+
+/** One capture utterance: feed PCM frames, commit when speech ends, then close. */
 export type Utterance = {
   push(frame: Buffer): void;
+  commit(): void;
   close(): Promise<void>;
 };
 
@@ -79,11 +87,22 @@ function defaultSocketFactory(url: string, opts: { headers: Record<string, strin
   return new Ctor(url, { headers: opts.headers });
 }
 
+/** Attach the required Scribe realtime query params to any base URL (including test overrides). */
+function buildUrl(base: string): string {
+  const u = new URL(base);
+  u.searchParams.set("model_id", "scribe_v2_realtime");
+  u.searchParams.set("audio_format", "pcm_16000");
+  u.searchParams.set("commit_strategy", "manual");
+  u.searchParams.set("include_timestamps", "false");
+  return u.toString();
+}
+
 function mapErrorType(t: string): { code: VoiceFailure["code"]; retryable: boolean } {
   switch (t) {
     case "auth_error":
-    case "unaccepted_terms":
       return { code: "auth", retryable: false };
+    case "unaccepted_terms":
+      return { code: "terms", retryable: false };
     case "quota_exceeded":
       return { code: "quota", retryable: false };
     case "rate_limited":
@@ -101,6 +120,8 @@ function failureMessage(t: string, detail: string): string {
   switch (mapErrorType(t).code) {
     case "auth":
       return `STT rejected credentials (${t}). Export a valid ELEVENLABS_API_KEY and restart Pi.${d ? ` ${d}` : ""}`;
+    case "terms":
+      return `STT terms not accepted (${t}). Accept the Speech-to-Text terms in the ElevenLabs dashboard, then retry.${d ? ` ${d}` : ""}`;
     case "quota":
       return `STT quota exceeded (${t}). Check usage/billing, then retry.${d ? ` ${d}` : ""}`;
     case "rate":
@@ -113,43 +134,45 @@ function failureMessage(t: string, detail: string): string {
 /**
  * Open one Scribe realtime utterance over a fresh socket.
  *
- * VAD query params are chosen example values from the integration guide, not
- * confirmed API defaults (the audit could not verify documented defaults).
- * The API key travels in the `xi-api-key` header only, never in the URL.
+ * Commit strategy is manual: the caller (local VAD endpointing) drives
+ * commit() when the user stops speaking. The API key travels in the
+ * `xi-api-key` header only, never in the URL.
  */
-export function startUtterance(
-  key: string,
-  handlers: SttHandlers,
-  opts?: { socketFactory?: SttSocketFactory; timers?: SttTimers; limits?: SttLimits },
-): Utterance {
+export function startUtterance(key: string, handlers: SttHandlers, opts?: SttOptions): Utterance {
   const socketFactory = opts?.socketFactory ?? defaultSocketFactory;
   const timers = opts?.timers ?? defaultTimers;
-  const silenceMs = opts?.limits?.silenceMs ?? DEFAULT_SILENCE_MS;
-  const noSpeechMs = opts?.limits?.noSpeechMs ?? DEFAULT_NO_SPEECH_MS;
-  const capMs = opts?.limits?.capMs ?? DEFAULT_CAP_MS;
-  const capGraceMs = opts?.limits?.capGraceMs ?? DEFAULT_CAP_GRACE_MS;
+  const url = buildUrl(opts?.url ?? STT_URL);
+  const capMs = opts?.capMs ?? opts?.limits?.capMs ?? DEFAULT_CAP_MS;
+  const commitGraceMs = opts?.commitGraceMs ?? opts?.limits?.commitGraceMs ?? DEFAULT_COMMIT_GRACE_MS;
 
   let done = false;
   let open = false;
   let committed: string[] = [];
+  let lastPartial = "";
   let pending: Buffer = Buffer.alloc(0);
   let socket: SttSocket | null = null;
-  let silenceId: unknown = null;
-  let noSpeechId: unknown = null;
+  let commitSent = false;
+  let commitDeferred = false;
+  let graceId: unknown = null;
   let capId: unknown = null;
-  let capGraceId: unknown = null;
   let closePromise: Promise<void> | null = null;
+
+  const emit = (type: string, info?: Record<string, unknown>): void => {
+    try {
+      handlers.onEvent?.(type, info);
+    } catch {
+      // Debug hook must never break the utterance.
+    }
+  };
 
   function clearTimer(id: unknown): void {
     if (id !== null) timers.clearTimeout(id);
   }
 
   function clearAllTimers(): void {
-    clearTimer(silenceId);
-    clearTimer(noSpeechId);
+    clearTimer(graceId);
     clearTimer(capId);
-    clearTimer(capGraceId);
-    silenceId = noSpeechId = capId = capGraceId = null;
+    graceId = capId = null;
   }
 
   function committedText(): string {
@@ -168,7 +191,7 @@ export function startUtterance(
     handlers.onEnd?.(info);
   }
 
-  function finalize(): void {
+  function finalizeCommitted(): void {
     const text = committedText();
     if (text === "") {
       end({ reason: "blank", text: "" });
@@ -183,7 +206,31 @@ export function startUtterance(
       // Socket already gone; finalizing anyway.
     }
     handlers.onFinal(text);
-    handlers.onEnd?.({ reason: "final", text });
+    handlers.onEnd?.({ reason: "final", text, source: "committed" });
+  }
+
+  function onGraceExpiry(): void {
+    graceId = null;
+    if (done) return;
+    const text = committedText();
+    if (text !== "") {
+      finalizeCommitted();
+      return;
+    }
+    const partial = lastPartial.trim();
+    if (partial !== "") {
+      done = true;
+      clearAllTimers();
+      try {
+        socket?.close();
+      } catch {
+        // Socket already gone; finalizing anyway.
+      }
+      handlers.onFinal(partial);
+      handlers.onEnd?.({ reason: "final", text: partial, source: "partial-fallback" });
+      return;
+    }
+    end({ reason: "blank", text: "" });
   }
 
   function fail(code: VoiceFailure["code"], message: string, retryable: boolean): void {
@@ -199,13 +246,13 @@ export function startUtterance(
     handlers.onEnd?.({ reason: "error", text: committedText() });
   }
 
-  function sendChunk(payload: { audio: Buffer; commit: boolean }): void {
+  function sendAudio(audio: Buffer): void {
     if (!socket || !open) return;
     socket.send(
       JSON.stringify({
         message_type: "input_audio_chunk",
-        audio_base_64: payload.audio.toString("base64"),
-        commit: payload.commit,
+        audio_base_64: audio.toString("base64"),
+        commit: false,
         sample_rate: SAMPLE_RATE,
       }),
     );
@@ -219,50 +266,47 @@ export function startUtterance(
     while (pending.length >= CHUNK_BYTES) {
       const piece = pending.subarray(0, CHUNK_BYTES);
       pending = pending.subarray(CHUNK_BYTES);
-      sendChunk({ audio: piece, commit: false });
+      sendAudio(piece);
     }
     if (!fullOnly && pending.length > 0) {
       const rest = pending;
       pending = Buffer.alloc(0);
-      sendChunk({ audio: rest, commit: false });
+      sendAudio(rest);
     }
   }
 
-  function noteActivity(): void {
-    clearTimer(noSpeechId);
-    noSpeechId = timers.setTimeout(() => finalizeBlank("no-speech"), noSpeechMs);
-    if (committed.length > 0) {
-      clearTimer(silenceId);
-      silenceId = timers.setTimeout(() => finalize(), silenceMs);
-    }
-  }
-
-  function finalizeBlank(_why: "no-speech" | "cap"): void {
+  function sendCommitMessage(): void {
     flush(false);
-    const text = committedText();
-    if (text !== "") {
-      finalize();
-      return;
+    socket?.send(
+      JSON.stringify({
+        message_type: "input_audio_chunk",
+        audio_base_64: "",
+        commit: true,
+        sample_rate: SAMPLE_RATE,
+      }),
+    );
+  }
+
+  function startGrace(): void {
+    clearTimer(graceId);
+    graceId = timers.setTimeout(onGraceExpiry, commitGraceMs);
+  }
+
+  function doCommit(): void {
+    if (commitSent || done) return;
+    commitSent = true;
+    commitDeferred = false;
+    try {
+      sendCommitMessage();
+    } catch {
+      // Send path dead; grace outcome still resolves the utterance.
     }
-    end({ reason: "blank", text: "" });
+    startGrace();
   }
 
   function onCap(): void {
     capId = null;
-    flush(false);
-    try {
-      socket?.send(
-        JSON.stringify({
-          message_type: "input_audio_chunk",
-          audio_base_64: "",
-          commit: true,
-          sample_rate: SAMPLE_RATE,
-        }),
-      );
-    } catch {
-      // Send path already dead; grace finalize still runs.
-    }
-    capGraceId = timers.setTimeout(() => finalizeBlank("cap"), capGraceMs);
+    doCommit();
   }
 
   function onMessage(raw: unknown): void {
@@ -278,47 +322,90 @@ export function startUtterance(
     const type = typeof msg.message_type === "string" ? msg.message_type : "";
     if (type === "session_started") {
       open = true;
+      emit("session_started");
+      try {
+        handlers.onSession?.();
+      } catch {
+        // Callback error must not break the utterance.
+      }
       flush(true);
+      if (commitDeferred) doCommit();
       return;
     }
     if (type === "partial_transcript") {
       if (typeof msg.text === "string" && msg.text !== "") {
-        noteActivity();
+        lastPartial = msg.text;
+        emit("partial_transcript", { length: msg.text.length });
         if (!done) handlers.onPartial(msg.text);
+      } else {
+        emit("partial_transcript", { length: 0 });
       }
       return;
     }
     if (type === "committed_transcript") {
       if (typeof msg.text === "string" && msg.text.trim() !== "") {
         committed.push(msg.text.trim());
-        noteActivity();
+        emit("committed_transcript", { length: msg.text.length });
+        if (commitSent) finalizeCommitted();
+      } else {
+        emit("committed_transcript", { length: 0 });
       }
       return;
     }
-    if (type === "committed_transcript_with_timestamps") return;
+    if (type === "committed_transcript_with_timestamps") {
+      emit("committed_transcript_with_timestamps");
+      return;
+    }
     if (type === "") return;
+    emit(type);
     const mapped = mapErrorType(type);
     const rawDetail = typeof msg.error === "string" ? msg.error : "";
     const detail = rawDetail.includes(key) ? "" : rawDetail;
     fail(mapped.code, failureMessage(type, detail), mapped.retryable);
   }
 
-  function onSocketClose(): void {
+  function onSocketClose(code: unknown, reason: unknown): void {
+    const info: Record<string, unknown> = {};
+    if (typeof code === "number") info["code"] = code;
+    const reasonText = typeof reason === "string" ? reason : Buffer.isBuffer(reason) ? reason.toString("utf8") : "";
+    if (reasonText !== "") info["reason"] = reasonText.slice(0, 160);
+    emit("close", info);
     if (done) return;
-    fail("network", "STT connection closed before the final transcript.", true);
+    const codePart = typeof code === "number" ? ` (code ${code})` : "";
+    const reasonPart = reasonText !== "" ? `: ${reasonText.slice(0, 120)}` : "";
+    fail("network", `STT connection closed${codePart} before the final transcript${reasonPart}.`, true);
   }
 
-  function onSocketError(): void {
+  function onSocketError(err: unknown): void {
+    const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
+    emit("error", message !== "" ? { message: message.slice(0, 160) } : undefined);
     if (done) return;
-    fail("network", "STT connection failed.", true);
+    const suffix = message !== "" && !message.includes(key) ? `: ${message.slice(0, 120)}` : "";
+    fail("network", `STT connection failed${suffix}.`, true);
+  }
+
+  function onUnexpectedResponse(status: unknown): void {
+    const code = typeof status === "number" ? status : -1;
+    emit("unexpected-response", { statusCode: code });
+    if (done) return;
+    if (code === 401 || code === 403) {
+      fail("auth", `STT rejected credentials (HTTP ${code} on upgrade). Export a valid ELEVENLABS_API_KEY and restart Pi.`, false);
+    } else if (code === 429) {
+      fail("rate", `STT throttled (HTTP ${code} on upgrade); retry shortly.`, true);
+    } else {
+      fail("network", `STT upgrade failed (HTTP ${code}); retry shortly.`, true);
+    }
   }
 
   try {
-    socket = socketFactory(STT_URL, { headers: { "xi-api-key": key } });
-  } catch {
-    fail("network", "STT connection failed.", true);
+    socket = socketFactory(url, { headers: { "xi-api-key": key } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "";
+    const suffix = message !== "" ? `: ${message.slice(0, 120)}` : "";
+    fail("network", `STT connection failed${suffix}.`, true);
     return {
       push: (_frame: Buffer): void => {},
+      commit: (): void => {},
       close: (): Promise<void> => Promise.resolve(),
     };
   }
@@ -326,17 +413,23 @@ export function startUtterance(
   s.on("message", (...args: unknown[]) => {
     onMessage(args[0]);
   });
-  s.on("close", () => {
-    onSocketClose();
+  s.on("close", (...args: unknown[]) => {
+    onSocketClose(args[0], args[1]);
   });
-  s.on("error", () => {
-    onSocketError();
+  s.on("error", (...args: unknown[]) => {
+    onSocketError(args[0]);
   });
-  s.on("open", () => {
+  s.on("unexpected-response", (...args: unknown[]) => {
+    // ws emits (req, res); the status lives on the response.
+    const res = args[1] as { statusCode?: unknown } | undefined;
+    onUnexpectedResponse(res?.statusCode);
+  });
+  s.on("open", (...args: unknown[]) => {
+    void args;
+    emit("open");
     if (!done) flush(true);
   });
 
-  noSpeechId = timers.setTimeout(() => finalizeBlank("no-speech"), noSpeechMs);
   capId = timers.setTimeout(() => onCap(), capMs);
 
   return {
@@ -344,6 +437,14 @@ export function startUtterance(
       if (done || frame.length === 0) return;
       pending = pending.length === 0 ? frame : Buffer.concat([pending, frame]);
       flush(true);
+    },
+    commit(): void {
+      if (done || commitSent) return;
+      if (!open) {
+        commitDeferred = true;
+        return;
+      }
+      doCommit();
     },
     close(): Promise<void> {
       if (closePromise) return closePromise;

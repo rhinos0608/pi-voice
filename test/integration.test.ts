@@ -28,6 +28,7 @@ type FakeUtterance = {
   handlers: SttHandlers;
   pushes: Buffer[];
   closed: number;
+  commits: number;
 };
 
 type FakeSpeech = {
@@ -113,11 +114,14 @@ function makeHarness(overrides?: { prefs?: Partial<VoicePreferences>; idle?: boo
       };
     },
     openUtterance: (_k: string, handlers: SttHandlers) => {
-      const u: FakeUtterance = { handlers, pushes: [], closed: 0 };
+      const u: FakeUtterance = { handlers, pushes: [], closed: 0, commits: 0 };
       utterances.push(u);
       return {
         push: (frame: Buffer): void => {
           u.pushes.push(frame);
+        },
+        commit: (): void => {
+          u.commits++;
         },
         close: async (): Promise<void> => {
           u.closed++;
