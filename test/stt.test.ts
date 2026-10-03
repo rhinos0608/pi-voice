@@ -435,6 +435,31 @@ describe("stt manual commits", () => {
     assert.ok(!t.failures[0]?.message.includes(KEY));
   });
 
+  it("cap fires deferred before session_started: audio precedes commit", () => {
+    const s = setup({ capMs: 1 });
+    s.u.push(pcm(9000, 9));
+    assert.equal(s.socket.sent.length, 0);
+    s.timers.advance(1);
+    // Cap fired while not open: nothing may be sent yet (commit deferred).
+    assert.equal(s.socket.sent.length, 0);
+    s.socket.emit("open");
+    s.socket.serverMessage({ message_type: "session_started" });
+    const sent = s.socket.sent.map((r) => JSON.parse(r) as Record<string, unknown>);
+    assert.ok(sent.length >= 2);
+    const last = sent[sent.length - 1] as Record<string, unknown>;
+    assert.equal(last["commit"], true);
+    for (const m of sent.slice(0, -1)) assert.equal(m["commit"], false);
+  });
+
+  it("redacts sk_-style secrets from provider error detail", () => {
+    const s = setup();
+    const secret = "sk_ABCDEFGHIJKLMNOP123456";
+    s.socket.serverMessage({ message_type: "auth_error", error: `bad ${secret} boom` });
+    assert.equal(s.failures.length, 1);
+    assert.ok(!s.failures[0]?.message.includes(secret));
+    assert.ok(!s.failures[0]?.message.includes("sk_ABCDEFGHIJKLMNOP"));
+  });
+
   it("ignores malformed messages without ending the utterance", () => {
     const s = setup();
     openSession(s);

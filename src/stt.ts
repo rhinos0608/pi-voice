@@ -115,6 +115,17 @@ function mapErrorType(t: string): { code: VoiceFailure["code"]; retryable: boole
   }
 }
 
+const SK_LIKE_PATTERN = /\bsk_[A-Za-z0-9]{16,}/g;
+const REDACTED = "[redacted]";
+
+function redactSecrets(value: string, key: string): string {
+  let out = value;
+  if (key !== "") out = out.split(key).join(REDACTED);
+  SK_LIKE_PATTERN.lastIndex = 0;
+  out = out.replace(SK_LIKE_PATTERN, REDACTED);
+  return out;
+}
+
 function failureMessage(t: string, detail: string): string {
   const d = detail.trim().slice(0, 160);
   switch (mapErrorType(t).code) {
@@ -306,6 +317,11 @@ export function startUtterance(key: string, handlers: SttHandlers, opts?: SttOpt
 
   function onCap(): void {
     capId = null;
+    if (commitSent || done) return;
+    if (!open) {
+      commitDeferred = true;
+      return;
+    }
     doCommit();
   }
 
@@ -360,7 +376,7 @@ export function startUtterance(key: string, handlers: SttHandlers, opts?: SttOpt
     emit(type);
     const mapped = mapErrorType(type);
     const rawDetail = typeof msg.error === "string" ? msg.error : "";
-    const detail = rawDetail.includes(key) ? "" : rawDetail;
+    const detail = redactSecrets(rawDetail, key);
     fail(mapped.code, failureMessage(type, detail), mapped.retryable);
   }
 
@@ -372,7 +388,7 @@ export function startUtterance(key: string, handlers: SttHandlers, opts?: SttOpt
     emit("close", info);
     if (done) return;
     const codePart = typeof code === "number" ? ` (code ${code})` : "";
-    const reasonPart = reasonText !== "" ? `: ${reasonText.slice(0, 120)}` : "";
+    const reasonPart = reasonText !== "" ? `: ${redactSecrets(reasonText, key).slice(0, 120)}` : "";
     fail("network", `STT connection closed${codePart} before the final transcript${reasonPart}.`, true);
   }
 
@@ -380,7 +396,7 @@ export function startUtterance(key: string, handlers: SttHandlers, opts?: SttOpt
     const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
     emit("error", message !== "" ? { message: message.slice(0, 160) } : undefined);
     if (done) return;
-    const suffix = message !== "" && !message.includes(key) ? `: ${message.slice(0, 120)}` : "";
+    const suffix = message !== "" ? `: ${redactSecrets(message, key).slice(0, 120)}` : "";
     fail("network", `STT connection failed${suffix}.`, true);
   }
 
@@ -401,7 +417,7 @@ export function startUtterance(key: string, handlers: SttHandlers, opts?: SttOpt
     socket = socketFactory(url, { headers: { "xi-api-key": key } });
   } catch (err) {
     const message = err instanceof Error ? err.message : "";
-    const suffix = message !== "" ? `: ${message.slice(0, 120)}` : "";
+    const suffix = message !== "" ? `: ${redactSecrets(message, key).slice(0, 120)}` : "";
     fail("network", `STT connection failed${suffix}.`, true);
     return {
       push: (_frame: Buffer): void => {},

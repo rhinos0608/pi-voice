@@ -277,6 +277,32 @@ describe("vad model provisioning", () => {
     }
   });
 
+  it("does not install the VAD model when aborted after the last chunk", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pivoice-vad-lateabort-"));
+    try {
+      const controller = new AbortController();
+      const fetchImpl = async (): Promise<{ ok: boolean; status: number; body: AsyncIterable<Uint8Array> }> => ({
+        ok: true,
+        status: 200,
+        body: (async function* () {
+          yield PAYLOAD;
+          controller.abort();
+        })(),
+      });
+      let renamed = false;
+      const deps = {
+        ...baseDeps(cacheRoot, fakeTar([])),
+        fetchImpl,
+        renameImpl: async () => { renamed = true; },
+      };
+      await assert.rejects(() => ensureVadModel(controller.signal, deps), /abort/i);
+      assert.equal(renamed, false);
+      assert.equal(existsSync(vadModelPath(cacheRoot)), false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
   it("exposes pinned metadata matching the released model", () => {
     assert.equal(VAD_MODEL_BYTES, 643854);
     assert.equal(VAD_MODEL_SHA256, "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6");

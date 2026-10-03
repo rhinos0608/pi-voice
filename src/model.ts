@@ -300,8 +300,13 @@ export async function ensureVadModel(signal: AbortSignal, deps?: ModelDeps): Pro
       throw new Error(`VAD model size mismatch: got ${bytes} bytes, want ${VAD_MODEL_BYTES}.`);
     }
     const tmp = join(tmpBase, VAD_MODEL_NAME);
+    if (signal.aborted) throw new Error("VAD model provisioning aborted.");
     await writeFile(tmp, Buffer.concat(chunks));
     await mkdir(dirname(dest), { recursive: true });
+    if (signal.aborted) {
+      await rm(tmp, { force: true }).catch(() => undefined);
+      throw new Error("VAD model provisioning aborted.");
+    }
     const renameImpl = deps?.renameImpl ?? rename;
     await renameImpl(tmp, dest);
     return dest;
