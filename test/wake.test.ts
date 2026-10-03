@@ -163,7 +163,7 @@ test("reset after wake delegates to spotter reset", () => {
     removeKeywordsFile: () => {},
   });
   det.reset();
-  assert.equal(seen.resets, 1);
+  assert.equal(seen.resets, 2, "both live and staggered streams reset");
   det.close();
 });
 
@@ -272,4 +272,154 @@ test("mapKeywordToPhrase falls back to raw keyword", () => {
   assert.equal(mapKeywordToPhrase("HEY PI", KEYWORDS), "HEY PI");
   assert.equal(mapKeywordToPhrase("  hi pi ", KEYWORDS), "HI PI");
   assert.equal(mapKeywordToPhrase("UNKNOWN WORDS", KEYWORDS), "UNKNOWN WORDS");
+});
+
+type FakeStreamState = {
+  accepted: Float32Array[];
+  resets: number;
+  ready: boolean;
+  keyword: string;
+};
+
+function state(): FakeStreamState {
+  return { accepted: [], resets: 0, ready: false, keyword: "" };
+}
+
+function totalSamples(s: FakeStreamState): number {
+  return s.accepted.reduce((n, a) => n + a.length, 0);
+}
+
+function concatSamples(s: FakeStreamState): Float32Array {
+  const out = new Float32Array(totalSamples(s));
+  let o = 0;
+  for (const a of s.accepted) {
+    out.set(a, o);
+    o += a.length;
+  }
+  return out;
+}
+
+function twoStreamSpotter(states: FakeStreamState[]): SpotterLike {
+  const streams: SpotterStream[] = states.map((st) => ({
+    acceptWaveform: (input) => {
+      st.accepted.push(input.samples);
+    },
+  }));
+  let next = 0;
+  const indexOf = (s: SpotterStream): number => streams.indexOf(s);
+  return {
+    createStream: () => streams[Math.min(next++, streams.length - 1)] as SpotterStream,
+    isReady: (s) => states[indexOf(s)]?.ready ?? false,
+    decode: (s) => {
+      const st = states[indexOf(s)];
+      if (st) st.ready = false;
+    },
+    reset: (s) => {
+      const st = states[indexOf(s)];
+      if (st) st.resets += 1;
+    },
+    getResult: (s) => ({ keyword: states[indexOf(s)]?.keyword ?? "" }),
+  };
+}
+
+function twoStreamDetector(
+  live: FakeStreamState,
+  lag: FakeStreamState,
+  onWake: (p: string, g: WakeGroup | undefined) => void,
+  extra?: { now?: () => number },
+): ReturnType<typeof createWakeDetector> {
+  return createWakeDetector(PATHS, "both", "normal", onWake, {
+    keywordsJsonText: KEYWORDS_TEXT,
+    now: extra?.now,
+    createSpotter: () => twoStreamSpotter([live, lag]),
+    writeKeywordsFile: () => "/tmp/fake-2s.txt",
+    removeKeywordsFile: () => {},
+  });
+}
+
+test("both streams are fed identical audio", () => {
+  const live = state();
+  const lag = state();
+  const det = twoStreamDetector(live, lag, () => {});
+  const frame = Buffer.alloc(3200, 7);
+  for (let i = 0; i < 20; i++) det.push(frame); // 2 s of audio
+  det.close();
+  const liveAll = concatSamples(live);
+  const lagAll = concatSamples(lag);
+  assert.equal(liveAll.length, 20 * 1600);
+  assert.equal(lagAll.length, 20 * 1600 - 12000, "lag stream trails by 0.75 s of content");
+  assert.deepEqual(Array.from(lagAll), Array.from(liveAll.subarray(0, lagAll.length)));
+});
+
+test("staggered stream is held 0.75 s behind", () => {
+  const live = state();
+  const lag = state();
+  const det = twoStreamDetector(live, lag, () => {});
+  det.push(Buffer.alloc(16000)); // 0.5 s: live fed, lag gets nothing
+  assert.equal(totalSamples(live), 8000);
+  assert.equal(totalSamples(lag), 0);
+  det.push(Buffer.alloc(16000)); // 1.0 s total: lag releases the oldest 0.25 s
+  assert.equal(totalSamples(live), 16000);
+  assert.equal(totalSamples(lag), 4000);
+  det.close();
+});
+
+test("both streams reset on detection", () => {
+  const live = state();
+  const lag = state();
+  live.ready = true;
+  live.keyword = "HEY PI";
+  const phrases: string[] = [];
+  const det = twoStreamDetector(live, lag, (p) => phrases.push(p));
+  det.push(Buffer.alloc(3200));
+  assert.deepEqual(phrases, ["HEY PI"]);
+  assert.ok(live.resets >= 1, "live stream reset");
+  assert.ok(lag.resets >= 1, "staggered stream reset");
+  det.close();
+});
+
+test("detection on either stream fires once within refractory", () => {
+  const live = state();
+  const lag = state();
+  live.ready = true;
+  live.keyword = "HEY PI";
+  lag.ready = true;
+  lag.keyword = "HEY PI";
+  const phrases: string[] = [];
+  let t = 5000;
+  const det = createWakeDetector(PATHS, "both", "normal", (p) => phrases.push(p), {
+    keywordsJsonText: KEYWORDS_TEXT,
+    now: () => t,
+    createSpotter: () => twoStreamSpotter([live, lag]),
+    writeKeywordsFile: () => "/tmp/fake-2s.txt",
+    removeKeywordsFile: () => {},
+  });
+  det.push(Buffer.alloc(3200));
+  assert.equal(phrases.length, 1, "second stream fire inside window suppressed");
+  assert.ok(live.resets >= 1 && lag.resets >= 1, "both streams reset even when deduped");
+  det.close();
+});
+
+test("reset clears the stagger backlog", () => {
+  const live = state();
+  const lag = state();
+  const det = twoStreamDetector(live, lag, () => {});
+  det.push(Buffer.alloc(16000)); // 0.5 s buffered for the lag stream
+  det.reset();
+  det.push(Buffer.alloc(16000)); // only 0.5 s since reset: lag still gets nothing
+  assert.equal(totalSamples(lag), 0, "backlog cleared on reset");
+  det.close();
+});
+
+test("close disposes both streams", () => {
+  const live = state();
+  const lag = state();
+  const det = twoStreamDetector(live, lag, () => {});
+  det.push(Buffer.alloc(3200));
+  det.close();
+  assert.ok(live.resets >= 1, "live stream reset on close");
+  assert.ok(lag.resets >= 1, "staggered stream reset on close");
+  const liveTotal = totalSamples(live);
+  det.push(Buffer.alloc(3200));
+  assert.equal(totalSamples(live), liveTotal, "push after close is ignored");
 });

@@ -25,6 +25,12 @@ export const SENSITIVITY_CONFIG: Record<Sensitivity, { keywordsThreshold: number
 /** Minimum gap between consecutive onWake fires. */
 export const REFRACTORY_MS = 1500;
 
+/** How far behind the live stream the staggered stream lags, in seconds of audio. */
+export const STAGGER_LAG_S = 0.75;
+
+/** Sample rate of audio fed to the spotter streams. */
+export const SPOTTER_SAMPLE_RATE = 16000;
+
 export type SpotterStream = {
   acceptWaveform: (input: { samples: Float32Array; sampleRate: number }) => void;
 };
@@ -162,8 +168,11 @@ export function mapKeywordToPhrase(keyword: string, data: KeywordsJson): string 
  * mapped back via keywords.json. For choice != both a filtered keywords
  * file (bare token lines, no @/# suffix) is written to os.tmpdir() and
  * removed on close(); "both" reuses paths.keywordsFile. push() converts
- * s16le frames to Float32 and runs the decode loop, resetting the stream
- * after each detection; a ~1.5 s refractory period suppresses double fires.
+ * s16le frames to Float32 and runs the decode loop on two streams fed the
+ * same audio: a live stream plus a staggered stream held STAGGER_LAG_S of
+ * content behind each reset point (creation and every detection). Both
+ * streams are reset on any detection; a ~1.5 s refractory period suppresses
+ * double fires. All stagger timing is in audio samples, never wall-clock.
  */
 export function createWakeDetector(
   paths: ModelPaths,
@@ -200,9 +209,48 @@ export function createWakeDetector(
     keywordsScore: tuning.keywordsScore,
     keywordsThreshold: tuning.keywordsThreshold,
   });
-  const stream = spotter.createStream();
+  const streamLive = spotter.createStream();
+  const streamLag = spotter.createStream();
+  const lagSamples = Math.round(SPOTTER_SAMPLE_RATE * STAGGER_LAG_S);
+  // Samples accepted but not yet fed to the staggered stream; the tail of
+  // length lagSamples is always withheld so the lag stream trails the live
+  // stream by STAGGER_LAG_S of content.
+  let pending: Float32Array[] = [];
+  let pendingSamples = 0;
   let lastFire = Number.NEGATIVE_INFINITY;
   let closed = false;
+
+  function clearPending(): void {
+    pending = [];
+    pendingSamples = 0;
+  }
+
+  function resetBoth(): void {
+    spotter.reset(streamLive);
+    spotter.reset(streamLag);
+    clearPending();
+  }
+
+  function handleDetection(keyword: string): void {
+    resetBoth();
+    const phrase = mapKeywordToPhrase(keyword, data);
+    const group = mapKeywordToGroup(keyword, data);
+    const at = now();
+    if (at - lastFire >= refractoryMs) {
+      lastFire = at;
+      onWake(phrase, group);
+    }
+  }
+
+  function drainStream(stream: SpotterStream): void {
+    let guard = 0;
+    while (spotter.isReady(stream) && guard++ < 32) {
+      spotter.decode(stream);
+      const result = spotter.getResult(stream);
+      if (!result.keyword) continue;
+      handleDetection(result.keyword);
+    }
+  }
 
   return {
     push(frame: Buffer): void {
@@ -210,30 +258,38 @@ export function createWakeDetector(
       const count = Math.floor(frame.length / 2);
       const samples = new Float32Array(count);
       for (let i = 0; i < count; i++) samples[i] = frame.readInt16LE(i * 2) / 32768;
-      stream.acceptWaveform({ samples, sampleRate: 16000 });
-      let guard = 0;
-      while (spotter.isReady(stream) && guard++ < 32) {
-        spotter.decode(stream);
-        const result = spotter.getResult(stream);
-        if (!result.keyword) continue;
-        spotter.reset(stream);
-        const phrase = mapKeywordToPhrase(result.keyword, data);
-        const group = mapKeywordToGroup(result.keyword, data);
-        const at = now();
-        if (at - lastFire >= refractoryMs) {
-          lastFire = at;
-          onWake(phrase, group);
+      streamLive.acceptWaveform({ samples, sampleRate: SPOTTER_SAMPLE_RATE });
+      pending.push(samples);
+      pendingSamples += samples.length;
+      let releasable = pendingSamples - lagSamples;
+      while (releasable > 0 && pending.length > 0) {
+        const first = pending[0] as Float32Array;
+        if (first.length <= releasable) {
+          streamLag.acceptWaveform({ samples: first, sampleRate: SPOTTER_SAMPLE_RATE });
+          pending.shift();
+          pendingSamples -= first.length;
+          releasable -= first.length;
+        } else {
+          streamLag.acceptWaveform({
+            samples: first.subarray(0, releasable),
+            sampleRate: SPOTTER_SAMPLE_RATE,
+          });
+          pending[0] = first.subarray(releasable);
+          pendingSamples -= releasable;
+          releasable = 0;
         }
       }
+      drainStream(streamLive);
+      drainStream(streamLag);
     },
     reset(): void {
-      if (!closed) spotter.reset(stream);
+      if (!closed) resetBoth();
     },
     close(): void {
       if (closed) return;
       closed = true;
       try {
-        spotter.reset(stream);
+        resetBoth();
       } catch {
         /* ignore reset errors during teardown */
       }
