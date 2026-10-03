@@ -122,6 +122,7 @@ export class VoiceController {
   private noSpeechTimer: unknown = null;
   private micTimer: unknown = null;
   private submitted = false;
+  private modelAbort: AbortController | null = null;
   private committed = false;
   private endpointer: Endpointer | null = null;
   private vadPath: string | null = null;
@@ -229,10 +230,13 @@ export class VoiceController {
     this.zeroWarned = false;
     this.setPhase("preparing", "voice starting…");
     const prefs = this.deps.getPrefs();
+    this.modelAbort?.abort();
     const ctrl = new AbortController();
+    this.modelAbort = ctrl;
     try {
       const paths = await this.deps.ensureModel(ctrl.signal);
       this.vadPath = await this.deps.ensureVadModel(ctrl.signal);
+      if (this.modelAbort === ctrl) this.modelAbort = null;
       if (this.closed || gen !== this.generation) return;
       this.detector?.close();
       this.detector = this.deps.createDetector(
@@ -273,6 +277,8 @@ export class VoiceController {
   }
 
   private async stopQuiet(): Promise<void> {
+    this.modelAbort?.abort();
+    this.modelAbort = null;
     this.submitted = false;
     this.clearNoSpeechTimer();
     this.clearMicTimer();
@@ -683,13 +689,25 @@ export class VoiceController {
     const prefs = this.deps.getPrefs();
     if (prefs.sendMode === "review") {
       if (intent.thenSend) {
-        const combined = `${this.editorText()} ${intent.text}`.trim();
-        this.setEditorText("");
+        const existing = this.editorText();
+        const combined = `${existing} ${intent.text}`.trim();
         if (combined === "") {
+          this.setEditorText("");
           this.finishBlank(false);
           return;
         }
-        this.submitText(combined, "review-send");
+        const busy = !this.host.isIdle();
+        this.log("delivery", { mode: "review-send", followUp: busy, length: combined.length });
+        try {
+          if (busy) this.host.sendUserMessage(combined, { deliverAs: "followUp" });
+          else this.host.sendUserMessage(combined);
+          this.setEditorText("");
+        } catch (err) {
+          this.host.notify(`Voice submit failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+        }
+        (this.deps.playCue ?? defaultPlayCue)();
+        this.closeUtterance();
+        if (!this.closed) this.setPhase("wake", "🎙 listening");
         return;
       }
       const draft = this.editorText();

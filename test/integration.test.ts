@@ -233,6 +233,7 @@ function makeHarness(overrides?: { prefs?: Partial<VoicePreferences>; idle?: boo
     controller,
     host,
     prefs,
+    deps,
     sources,
     detectors,
     utterances,
@@ -733,6 +734,40 @@ describe("capture endpointing and delivery", () => {
     h.utterances[0].handlers.onFinal("more words send to pi");
     assert.deepEqual(h.host.sent[0], { text: "prior more words", opts: undefined });
     assert.equal(h.host.editor, "");
+  });
+
+  it("review trailing send keeps the existing draft when submit throws", async () => {
+    const h = makeHarness({ prefs: { sendMode: "review" } });
+    await h.controller.start();
+    h.host.editor = "prior";
+    h.host.sendUserMessage = () => {
+      throw new Error("boom");
+    };
+    h.detectors[0].fire();
+    h.utterances[0].handlers.onFinal("more words send to pi");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.host.editor, "prior");
+    assert.ok(h.host.notifies.some((m) => m.startsWith("Voice submit failed:")));
+  });
+
+  it("stop aborts an in-flight model download without a failed-start notify", async () => {
+    const h = makeHarness({});
+    let seen: AbortSignal | undefined;
+    h.deps.ensureModel = (signal: AbortSignal) =>
+      new Promise<never>((_resolve, reject) => {
+        seen = signal;
+        signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+    const started = h.controller.start();
+    await new Promise((r) => setTimeout(r, 0));
+    await h.controller.stop();
+    const outcome = await Promise.race([
+      started.then(() => "settled"),
+      new Promise((r) => setTimeout(() => r("hung"), 50)),
+    ]);
+    assert.equal(outcome, "settled");
+    assert.equal(seen?.aborted, true);
+    assert.ok(!h.host.notifies.some((m) => m.startsWith("Voice failed to start")));
   });
 
   it("send intent submits the draft and clears the editor", async () => {
