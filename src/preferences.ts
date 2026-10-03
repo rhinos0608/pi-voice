@@ -29,6 +29,7 @@ function withDefaults(raw: unknown): VoicePreferences {
         : { kind: "default" },
     autostart: typeof r["autostart"] === "boolean" ? r["autostart"] : DEFAULT_PREFERENCES.autostart,
     tts: typeof r["tts"] === "boolean" ? r["tts"] : DEFAULT_PREFERENCES.tts,
+    sendMode: r["sendMode"] === "auto" || r["sendMode"] === "review" ? r["sendMode"] : DEFAULT_PREFERENCES.sendMode,
   };
 }
 

@@ -10,6 +10,8 @@ export type VoicePreferences = {
   mic: { kind: "default" } | { kind: "named"; name: string };
   autostart: boolean;
   tts: boolean;
+  /** auto: submit transcripts immediately; review: paste into the editor, submit on Enter or "send to pi". */
+  sendMode: "auto" | "review";
 };
 
 export const DEFAULT_PREFERENCES: VoicePreferences = {
@@ -20,6 +22,7 @@ export const DEFAULT_PREFERENCES: VoicePreferences = {
   mic: { kind: "default" },
   autostart: true,
   tts: false,
+  sendMode: "auto",
 };
 
 /** Session-scoped voice pipeline phase. */
@@ -27,7 +30,7 @@ export type VoicePhase = "off" | "preparing" | "wake" | "capture" | "submit" | "
 
 /** Classified failure surfaced to status/UI. */
 export type VoiceFailure = {
-  code: "key_missing" | "model" | "mic" | "auth" | "quota" | "rate" | "network" | "audio" | "protocol";
+  code: "key_missing" | "model" | "mic" | "auth" | "quota" | "rate" | "network" | "audio" | "protocol" | "terms";
   message: string;
   retryable: boolean;
 };
