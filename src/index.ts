@@ -323,7 +323,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     prefs = loaded.prefs;
     if (loaded.warning) ctx.ui.notify(loaded.warning, "warning");
     const key = process.env["ELEVENLABS_API_KEY"];
-    const provisioned = await isWakeModelProvisioned();
+    const provisioned = (await isWakeModelProvisioned()) && (await isVadModelProvisioned());
     if (prefs.autostart && provisioned && key) {
       await controller.start();
       return;
