@@ -10,10 +10,14 @@
 
 import { spawn } from "node:child_process";
 import type { AudioSink, AudioSource, VoiceFailure, VoicePhase, VoicePreferences } from "./contracts.ts";
+import { parseTranscriptIntent } from "./intent.ts";
+import { analyzePcm, LevelMeter, meterBar } from "./level.ts";
+import { MicError } from "./mic.ts";
 import { createSpeechChunker, type SpeechChunker } from "./speech-text.ts";
-import type { SttHandlers, Utterance } from "./stt.ts";
+import type { SttEndInfo, SttHandlers, Utterance } from "./stt.ts";
 import { startSpeech, DEFAULT_TTS_MODEL, type Speech } from "./tts.ts";
-import type { WakeDetector } from "./wake.ts";
+import type { Endpointer, EndpointerEvents } from "./vad.ts";
+import type { WakeDetector, WakeGroup } from "./wake.ts";
 
 /** Narrow host surface the controller needs from Pi (adapted in index.ts). */
 export type VoiceHost = {
@@ -21,6 +25,9 @@ export type VoiceHost = {
   isIdle(): boolean;
   setStatus(text: string | undefined): void;
   notify(message: string, type?: "info" | "warning" | "error"): void;
+  pasteToEditor(text: string): void;
+  getEditorText(): string;
+  setEditorText(text: string): void;
 };
 
 /** Injectable factories and environment probes. */
@@ -34,9 +41,16 @@ export type ControllerDeps = {
     paths: { encoder: string; decoder: string; joiner: string; tokens: string; keywordsFile: string },
     choice: VoicePreferences["wake"],
     sensitivity: VoicePreferences["sensitivity"],
-    onWake: (phrase: string) => void,
+    onWake: (phrase: string, group: WakeGroup | undefined) => void,
+    options: { includeSend: boolean },
   ) => WakeDetector;
   openUtterance: (key: string, handlers: SttHandlers) => Utterance;
+  ensureVadModel: (signal: AbortSignal) => Promise<string>;
+  createEndpointer: (modelPath: string, events: EndpointerEvents) => Endpointer;
+  log?: (event: string, data?: Record<string, unknown>) => void;
+  playErrorCue?: () => void;
+  noSpeechMs?: number;
+  now?: () => number;
   openSpeech: (
     opts: { key: string; voiceId: string; modelId: string; onDone: () => void; onFailure: (f: VoiceFailure) => void },
   ) => Speech;
@@ -51,8 +65,15 @@ export type ControllerDeps = {
 };
 
 export const CUE_PATH = "/System/Library/Sounds/Tink.aiff";
+export const ERROR_CUE_PATH = "/System/Library/Sounds/Basso.aiff";
 export const COOLDOWN_MS = 700;
 export const RETRY_BACKOFF_MS = 2000;
+export const NO_SPEECH_MS_DEFAULT = 5000;
+export const STATUS_THROTTLE_MS = 100;
+export const FAILURE_NOTIFY_DEDUP_MS = 60_000;
+export const MIC_RESTART_BACKOFFS_MS = [1000, 2000, 4000] as const;
+export const ZERO_PCM_WARN_BYTES = 3 * 16000 * 2;
+export const TRANSIENT_STATUS_MS = 2000;
 
 export function defaultPlayCue(): void {
   try {
@@ -60,6 +81,15 @@ export function defaultPlayCue(): void {
     child.unref();
   } catch {
     // Cue is best-effort; wake proceeds regardless.
+  }
+}
+
+export function defaultPlayErrorCue(): void {
+  try {
+    const child = spawn("/usr/bin/afplay", [ERROR_CUE_PATH], { stdio: "ignore", detached: true });
+    child.unref();
+  } catch {
+    // Error cue is advisory; capture continues without it.
   }
 }
 
@@ -89,7 +119,19 @@ export class VoiceController {
   /** Ordered per-message speech queue; head (index 0) owns chunker/speech. */
   private speechQueue: QueuedSpeech[] = [];
   private timer: unknown = null;
+  private noSpeechTimer: unknown = null;
+  private micTimer: unknown = null;
   private submitted = false;
+  private endpointer: Endpointer | null = null;
+  private vadPath: string | null = null;
+  private speechHeard = false;
+  private lastPartial = "";
+  private meter = new LevelMeter();
+  private lastStatusAt = 0;
+  private micFailures = 0;
+  private failureNotifiedAt = new Map<string, number>();
+  private zeroBytes = 0;
+  private zeroWarned = false;
   private readonly host: VoiceHost;
   private readonly deps: ControllerDeps;
 
@@ -109,6 +151,37 @@ export class VoiceController {
     return { set: setFn, clear: clearFn };
   }
 
+  private log(event: string, data?: Record<string, unknown>): void {
+    try {
+      this.deps.log?.(event, data);
+    } catch {
+      // Debug sink must never break the pipeline.
+    }
+  }
+
+  private now(): number {
+    return this.deps.now?.() ?? Date.now();
+  }
+
+  private playErrorCue(): void {
+    try {
+      (this.deps.playErrorCue ?? defaultPlayErrorCue)();
+    } catch {
+      // Cue is advisory; capture continues without it.
+    }
+  }
+
+  private closeEndpointer(): void {
+    const ep = this.endpointer;
+    this.endpointer = null;
+    if (!ep) return;
+    try {
+      ep.close();
+    } catch {
+      // Endpointer teardown is best-effort.
+    }
+  }
+
   private later(cb: () => void, ms: number): void {
     this.clearTimer();
     this.timer = this.timers.set(() => {
@@ -124,7 +197,22 @@ export class VoiceController {
     }
   }
 
+  private clearNoSpeechTimer(): void {
+    if (this.noSpeechTimer !== null) {
+      this.timers.clear(this.noSpeechTimer);
+      this.noSpeechTimer = null;
+    }
+  }
+
+  private clearMicTimer(): void {
+    if (this.micTimer !== null) {
+      this.timers.clear(this.micTimer);
+      this.micTimer = null;
+    }
+  }
+
   private setPhase(next: VoicePhase, status: string | undefined): void {
+    if (this.phase !== next) this.log("phase", { from: this.phase, to: next });
     this.phase = next;
     this.host.setStatus(status);
   }
@@ -135,14 +223,24 @@ export class VoiceController {
     if (this.phase === "wake" || this.phase === "capture" || this.phase === "speaking" || this.phase === "submit") return;
     this.starting = true;
     const gen = ++this.generation;
+    this.micFailures = 0;
+    this.zeroBytes = 0;
+    this.zeroWarned = false;
     this.setPhase("preparing", "voice starting…");
     const prefs = this.deps.getPrefs();
     const ctrl = new AbortController();
     try {
       const paths = await this.deps.ensureModel(ctrl.signal);
+      this.vadPath = await this.deps.ensureVadModel(ctrl.signal);
       if (this.closed || gen !== this.generation) return;
       this.detector?.close();
-      this.detector = this.deps.createDetector(paths, prefs.wake, prefs.sensitivity, (phrase) => this.onWake(phrase));
+      this.detector = this.deps.createDetector(
+        paths,
+        prefs.wake,
+        prefs.sensitivity,
+        (phrase, group) => this.onWake(phrase, group),
+        { includeSend: prefs.sendMode === "review" },
+      );
       const source = this.deps.createSource(prefs.mic, (msg) => this.host.notify(msg, "warning"));
       this.source = source;
       await source.start(
@@ -175,6 +273,9 @@ export class VoiceController {
 
   private async stopQuiet(): Promise<void> {
     this.submitted = false;
+    this.clearNoSpeechTimer();
+    this.clearMicTimer();
+    this.closeEndpointer();
     const utterance = this.utterance;
     this.utterance = null;
     if (utterance) await utterance.close().catch(() => undefined);
@@ -222,16 +323,88 @@ export class VoiceController {
 
   private onSourceError(err: Error): void {
     const gen = this.generation;
+    if (this.closed || gen !== this.generation) return;
+    if (err instanceof MicError && err.code === "permission") {
+      this.log("mic-error", { code: err.code });
+      void (async (): Promise<void> => {
+        if (this.closed || gen !== this.generation) return;
+        this.generation += 1;
+        await this.stopQuiet();
+        if (this.closed || gen + 1 !== this.generation) return;
+        this.setPhase("off", "voice off");
+        this.host.notify(
+          "Microphone access denied. Grant the terminal app Microphone access in System Settings › Privacy & Security › Microphone, then turn voice back on.",
+          "error",
+        );
+      })();
+      return;
+    }
+    if (err instanceof MicError) {
+      this.scheduleMicRestart(err, gen);
+      return;
+    }
     void (async (): Promise<void> => {
       if (this.closed || gen !== this.generation) return;
+      this.generation += 1;
       await this.stopQuiet();
+      if (this.closed || gen + 1 !== this.generation) return;
       this.setPhase("off", "voice off");
       this.host.notify(`Microphone failed: ${err.message}`, "error");
     })();
   }
 
+  private scheduleMicRestart(err: MicError, gen: number): void {
+    if (this.closed || gen !== this.generation) return;
+    if (this.micFailures >= MIC_RESTART_BACKOFFS_MS.length) {
+      this.log("mic-error", { code: err.code, gaveUp: true });
+      void (async (): Promise<void> => {
+        if (this.closed || gen !== this.generation) return;
+        this.generation += 1;
+        await this.stopQuiet();
+        if (this.closed || gen + 1 !== this.generation) return;
+        this.setPhase("off", "voice off");
+        this.host.notify(`Microphone failed after 3 restarts — voice off: ${err.message}`, "error");
+      })();
+      return;
+    }
+    const delay = MIC_RESTART_BACKOFFS_MS[this.micFailures] ?? 1000;
+    this.micFailures += 1;
+    if (this.micFailures === 1) this.host.notify("Microphone stalled — restarting", "warning");
+    this.log("mic-restart", { code: err.code, attempt: this.micFailures, delayMs: delay });
+    this.clearMicTimer();
+    this.micTimer = this.timers.set(() => {
+      this.micTimer = null;
+      void this.restartSource(gen);
+    }, delay);
+  }
+
+  private async restartSource(gen: number): Promise<void> {
+    if (this.closed || gen !== this.generation) return;
+    try {
+      await this.source?.stop();
+    } catch {
+      // Old source teardown is best-effort; starting fresh below.
+    }
+    if (this.closed || gen !== this.generation) return;
+    const prefs = this.deps.getPrefs();
+    try {
+      const next = this.deps.createSource(prefs.mic, (msg) => this.host.notify(msg, "warning"));
+      this.source = next;
+      await next.start(
+        (chunk) => this.onFrame(chunk),
+        (error) => this.onSourceError(error),
+      );
+      this.log("mic-restart", { attempt: this.micFailures, started: true });
+    } catch (err) {
+      this.onSourceError(
+        err instanceof MicError ? err : new MicError("spawn", err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
+
   private onFrame(chunk: Buffer): void {
-    if (this.closed) return;
+    if (this.closed || chunk.length === 0) return;
+    this.trackAudioHealth(chunk);
     if (this.phase === "wake" || this.phase === "speaking") {
       try {
         this.detector?.push(chunk);
@@ -246,14 +419,68 @@ export class VoiceController {
       } catch {
         // Ignore push errors; STT failure paths report on their own.
       }
+      try {
+        this.endpointer?.push(chunk);
+      } catch {
+        // VAD must never break the capture.
+      }
+      try {
+        this.meter.push(chunk);
+      } catch {
+        // Metering is advisory.
+      }
+      this.maybeCaptureStatus();
     }
   }
 
-  private onWake(_phrase: string): void {
+  private trackAudioHealth(chunk: Buffer): void {
+    let allZero = false;
+    try {
+      allZero = analyzePcm(chunk).allZero;
+    } catch {
+      return;
+    }
+    if (!allZero) {
+      this.zeroBytes = 0;
+      this.micFailures = 0;
+      return;
+    }
+    this.zeroBytes += chunk.length;
+    if (!this.zeroWarned && this.zeroBytes >= ZERO_PCM_WARN_BYTES) {
+      this.zeroWarned = true;
+      this.log("mic-silent", { zeroBytes: this.zeroBytes });
+      this.host.notify(
+        "Microphone is delivering pure silence — macOS likely denied microphone access to the terminal app.",
+        "warning",
+      );
+    }
+  }
+
+  private captureStatusText(): string {
+    const bar = meterBar(this.meter.db);
+    if (this.lastPartial === "") return `🎙 ${bar} listening…`;
+    return `🎙 ${bar} ${truncate(this.lastPartial, 60)}`;
+  }
+
+  private maybeCaptureStatus(): void {
+    if (this.phase !== "capture") return;
+    if (this.now() - this.lastStatusAt < STATUS_THROTTLE_MS) return;
+    this.lastStatusAt = this.now();
+    this.host.setStatus(this.captureStatusText());
+  }
+
+  private onWake(phrase: string, group: WakeGroup | undefined): void {
     if (this.closed) return;
     if (this.phase !== "wake" && this.phase !== "speaking") return;
+    this.log("wake", { group: group ?? "unknown", phraseLength: phrase.length });
+    if (group === "send-to-pi") {
+      this.onSendSpotter();
+      return;
+    }
     const gen = ++this.generation;
     this.clearTimer();
+    this.clearNoSpeechTimer();
+    this.closeEndpointer();
     this.cancelSpeech();
     const key = this.deps.getKey();
     if (!key) {
@@ -266,13 +493,18 @@ export class VoiceController {
     this.utterance = null;
     if (old) void old.close().catch(() => undefined);
     this.submitted = false;
+    this.speechHeard = false;
+    this.lastPartial = "";
+    this.meter.reset();
     this.detector?.reset();
     try {
       this.utterance = this.deps.openUtterance(key, {
         onPartial: (text) => this.onPartial(text, gen),
         onFinal: (text) => this.onFinal(text, gen),
         onFailure: (f) => this.onSttFailure(f, gen),
-        onEnd: () => {},
+        onEnd: (info) => this.onEnd(info, gen),
+        onSession: () => this.log("stt-event", { type: "session-started" }),
+        onEvent: (type, info) => this.logSttEvent(type, info),
       });
     } catch (err) {
       this.onSttFailure(
@@ -281,43 +513,220 @@ export class VoiceController {
       );
       return;
     }
-    this.setPhase("capture", "🎙 capturing…");
+    this.openEndpointer(gen);
+    this.setPhase("capture", this.captureStatusText());
+    this.lastStatusAt = this.now();
+    this.armNoSpeechTimer(gen);
   }
 
-  private onPartial(text: string, gen: number): void {
-    if (this.closed || gen !== this.generation || this.phase !== "capture") return;
-    this.host.setStatus(`🎙 hearing: ${truncate(text.trim(), 60)}`);
+  private onSendSpotter(): void {
+    this.log("wake", { group: "send-to-pi" });
+    const draft = this.editorText().trim();
+    if (draft === "") return;
+    this.submitDraft();
   }
 
-  private onFinal(text: string, gen: number): void {
-    if (this.closed || gen !== this.generation) return;
-    if (this.submitted) return;
-    const clean = text.trim();
-    if (clean === "") {
-      this.setPhase("wake", "🎙 listening");
-      return;
+  private openEndpointer(gen: number): void {
+    this.closeEndpointer();
+    if (!this.vadPath || typeof this.deps.createEndpointer !== "function") return;
+    try {
+      this.endpointer = this.deps.createEndpointer(this.vadPath, {
+        onSpeechStart: (atSec) => {
+          if (this.closed || gen !== this.generation || this.phase !== "capture") return;
+          this.speechHeard = true;
+          this.clearNoSpeechTimer();
+          this.log("vad-start", { atSec });
+        },
+        onSpeechEnd: (atSec) => {
+          if (this.closed || gen !== this.generation || this.phase !== "capture") return;
+          this.log("vad-end", { atSec });
+          try {
+            this.utterance?.commit();
+          } catch {
+            // Commit failure surfaces via STT failure paths.
+          }
+          this.lastStatusAt = this.now();
+          this.host.setStatus("🎙 transcribing…");
+        },
+      });
+    } catch (err) {
+      this.log("vad-error", { message: err instanceof Error ? err.message : String(err) });
     }
-    this.submitted = true;
-    this.setPhase("submit", "🎙 sending…");
+  }
+
+  private armNoSpeechTimer(gen: number): void {
+    this.clearNoSpeechTimer();
+    const ms = this.deps.noSpeechMs ?? NO_SPEECH_MS_DEFAULT;
+    this.noSpeechTimer = this.timers.set(() => {
+      this.noSpeechTimer = null;
+      if (this.closed || gen !== this.generation || this.phase !== "capture" || this.speechHeard) return;
+      this.log("no-speech", { timeoutMs: ms });
+      this.closeUtterance();
+      this.closeEndpointer();
+      this.playErrorCue();
+      if (this.closed || gen !== this.generation) return;
+      this.setPhase("wake", "🎙 didn't hear anything");
+      this.later(() => {
+        if (!this.closed && gen === this.generation && this.phase === "wake") this.host.setStatus("🎙 listening");
+      }, TRANSIENT_STATUS_MS);
+    }, ms);
+  }
+
+  private editorText(): string {
+    try {
+      return this.host.getEditorText?.() ?? "";
+    } catch {
+      return "";
+    }
+  }
+
+  private setEditorText(text: string): void {
+    try {
+      this.host.setEditorText?.(text);
+    } catch {
+      // Editor sync is best-effort.
+    }
+  }
+
+  private closeUtterance(): void {
+    const after = this.utterance;
+    this.utterance = null;
+    if (after) void after.close().catch(() => undefined);
+  }
+
+  private submitText(clean: string, mode: string): void {
     const busy = !this.host.isIdle();
+    this.log("delivery", { mode, followUp: busy, length: clean.length });
     try {
       if (busy) this.host.sendUserMessage(clean, { deliverAs: "followUp" });
       else this.host.sendUserMessage(clean);
     } catch (err) {
       this.host.notify(`Voice submit failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
-    const after = this.utterance;
-    this.utterance = null;
-    if (after) void after.close().catch(() => undefined);
-    if (!this.closed && gen === this.generation) this.setPhase("wake", "🎙 listening");
+    (this.deps.playCue ?? defaultPlayCue)();
+    this.closeUtterance();
+    if (!this.closed) this.setPhase("wake", "🎙 listening");
+  }
+
+  private submitDraft(): boolean {
+    const draft = this.editorText().trim();
+    if (draft === "") return false;
+    const busy = !this.host.isIdle();
+    this.log("delivery", { mode: "draft", followUp: busy, length: draft.length });
+    try {
+      if (busy) this.host.sendUserMessage(draft, { deliverAs: "followUp" });
+      else this.host.sendUserMessage(draft);
+      this.setEditorText("");
+    } catch (err) {
+      this.host.notify(`Voice submit failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+    (this.deps.playCue ?? defaultPlayCue)();
+    this.closeUtterance();
+    if (!this.closed) this.setPhase("wake", "🎙 listening");
+    return true;
+  }
+
+  private finishBlank(partialFallback: boolean): void {
+    this.closeUtterance();
+    this.playErrorCue();
+    this.log("stt-end", partialFallback ? { reason: "blank", source: "partial-fallback" } : { reason: "blank" });
+    if (this.closed) return;
+    const gen = this.generation;
+    this.setPhase("wake", "🎙 didn't catch that");
+    this.later(() => {
+      if (!this.closed && gen === this.generation && this.phase === "wake") this.host.setStatus("🎙 listening");
+    }, TRANSIENT_STATUS_MS);
+  }
+
+  private logSttEvent(type: string, info?: Record<string, unknown>): void {
+    const { text: _dropped, ...rest } = info ?? {};
+    void _dropped;
+    this.log("stt-event", { type, ...rest });
+  }
+
+  private onPartial(text: string, gen: number): void {
+    if (this.closed || gen !== this.generation || this.phase !== "capture") return;
+    this.lastPartial = text.trim();
+    this.maybeCaptureStatus();
+  }
+
+  private onFinal(text: string, gen: number): void {
+    if (this.closed || gen !== this.generation) return;
+    if (this.submitted) return;
+    this.submitted = true;
+    this.clearNoSpeechTimer();
+    this.closeEndpointer();
+    const clean = text.trim();
+    const intent = parseTranscriptIntent(text);
+    this.log("intent", { kind: intent.kind, length: clean.length });
+    if (intent.kind === "empty" || clean === "") {
+      this.finishBlank(false);
+      return;
+    }
+    if (intent.kind === "send") {
+      if (this.submitDraft()) return;
+      if (this.closed) return;
+      this.setPhase("wake", "📝 nothing to send");
+      const g = this.generation;
+      this.later(() => {
+        if (!this.closed && g === this.generation && this.phase === "wake") this.host.setStatus("🎙 listening");
+      }, TRANSIENT_STATUS_MS);
+      return;
+    }
+    const prefs = this.deps.getPrefs();
+    if (prefs.sendMode === "review") {
+      if (intent.thenSend) {
+        const combined = `${this.editorText()} ${intent.text}`.trim();
+        this.setEditorText("");
+        if (combined === "") {
+          this.finishBlank(false);
+          return;
+        }
+        this.submitText(combined, "review-send");
+        return;
+      }
+      const draft = this.editorText();
+      this.setEditorText(draft === "" ? intent.text : `${draft} ${intent.text}`);
+      this.log("delivery", { mode: "review-append", length: intent.text.length });
+      this.closeUtterance();
+      if (!this.closed) this.setPhase("wake", '📝 draft · Enter or say "send to pi"');
+      return;
+    }
+    this.submitText(intent.text, "auto");
+  }
+
+  private onEnd(info: SttEndInfo, gen: number): void {
+    if (this.closed || gen !== this.generation) return;
+    this.clearNoSpeechTimer();
+    this.closeEndpointer();
+    if (info.source === "partial-fallback") this.log("stt-end", { reason: info.reason, source: info.source });
+    if (this.submitted) return;
+    if (info.reason === "final" && info.text.trim() !== "") {
+      this.onFinal(info.text, gen);
+      return;
+    }
+    if (info.reason === "blank" || (info.reason === "final" && info.text.trim() === "")) {
+      this.submitted = true;
+      this.finishBlank(info.source === "partial-fallback");
+      return;
+    }
+    this.closeUtterance();
   }
 
   private onSttFailure(f: VoiceFailure, gen: number): void {
     if (this.closed || gen !== this.generation) return;
-    const old = this.utterance;
-    this.utterance = null;
-    if (old) void old.close().catch(() => undefined);
-    if (!f.retryable || f.code === "auth" || f.code === "quota" || f.code === "mic" || f.code === "key_missing") {
+    this.clearNoSpeechTimer();
+    this.closeEndpointer();
+    this.closeUtterance();
+    this.log("failure", { code: f.code, messageLength: f.message.length, retryable: f.retryable });
+    if (
+      !f.retryable ||
+      f.code === "auth" ||
+      f.code === "terms" ||
+      f.code === "quota" ||
+      f.code === "mic" ||
+      f.code === "key_missing"
+    ) {
       void (async (): Promise<void> => {
         await this.stopQuiet();
         if (!this.closed && gen === this.generation) {
@@ -327,7 +736,14 @@ export class VoiceController {
       })();
       return;
     }
-    this.setPhase("wake", "🎙 listening");
+    const at = this.now();
+    const last = this.failureNotifiedAt.get(f.code) ?? Number.NEGATIVE_INFINITY;
+    if (at - last >= FAILURE_NOTIFY_DEDUP_MS) {
+      this.failureNotifiedAt.set(f.code, at);
+      this.host.notify(f.message, "warning");
+    }
+    this.playErrorCue();
+    this.setPhase("wake", `⚠ ${truncate(f.message, 80)}`);
     const backoff = this.deps.retryBackoffMs ?? RETRY_BACKOFF_MS;
     this.later(() => {
       if (!this.closed && gen === this.generation && this.phase === "wake") this.host.setStatus("🎙 listening");

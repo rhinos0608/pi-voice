@@ -11,15 +11,17 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_PREFERENCES, type VoicePreferences } from "./contracts.ts";
+import { DEFAULT_PREFERENCES, type ModelPaths, type VoicePreferences } from "./contracts.ts";
 import { VoiceController, type VoiceHost } from "./controller.ts";
+import { createDebugLog } from "./debuglog.ts";
 import { createAvFoundationSource, FFMPEG_PATH, listMicrophones } from "./mic.ts";
-import { ensureWakeModel, isWakeModelProvisioned } from "./model.ts";
+import { ensureVadModel, ensureWakeModel, isWakeModelProvisioned } from "./model.ts";
 import { createFfplaySink, FFPLAY_PATH } from "./player.ts";
 import { keyStatus, loadPreferences, savePreferences } from "./preferences.ts";
 import { startUtterance } from "./stt.ts";
 import { DEFAULT_TTS_MODEL, startSpeech } from "./tts.ts";
-import { createWakeDetector } from "./wake.ts";
+import { createEndpointer, type EndpointerEvents } from "./vad.ts";
+import { createWakeDetector, type WakeGroup } from "./wake.ts";
 import {
   getVoiceCompletions,
   handleVoiceCommand,
@@ -100,6 +102,11 @@ async function runLiveTest(kind: "mic" | "wake" | "tts", prefs: VoicePreferences
 export default function voiceExtension(pi: ExtensionAPI): void {
   let prefs: VoicePreferences = { ...DEFAULT_PREFERENCES };
   let liveCtx: ExtensionContext | ExtensionCommandContext | null = null;
+  const debug = createDebugLog();
+
+  function editorUi(): ExtensionContext["ui"] | null {
+    return liveCtx?.hasUI ? liveCtx.ui : null;
+  }
 
   const host: VoiceHost = {
     sendUserMessage: (text, opts) => {
@@ -113,6 +120,13 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     notify: (message, type) => {
       liveCtx?.ui.notify(message, type ?? "info");
     },
+    pasteToEditor: (text) => {
+      editorUi()?.pasteToEditor(text);
+    },
+    getEditorText: () => editorUi()?.getEditorText() ?? "",
+    setEditorText: (text) => {
+      editorUi()?.setEditorText(text);
+    },
   };
 
   const controller = new VoiceController(host, {
@@ -121,9 +135,18 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     isModelProvisioned: () => isWakeModelProvisioned(),
     ensureModel: (signal) => ensureWakeModel(signal),
     createSource: (mic, onNotice) => createAvFoundationSource(mic, { onNotice }),
-    createDetector: (paths, choice, sensitivity, onWake) => createWakeDetector(paths, choice, sensitivity, onWake),
+    createDetector: (
+      paths: ModelPaths,
+      choice: VoicePreferences["wake"],
+      sensitivity: VoicePreferences["sensitivity"],
+      onWake: (phrase: string, group: WakeGroup | undefined) => void,
+      options: { includeSend: boolean },
+    ) => createWakeDetector(paths, choice, sensitivity, onWake, undefined, options),
     openUtterance: (key, handlers) => startUtterance(key, handlers),
     openSpeech: (opts) => startSpeech(opts, { sinkFactory: () => createFfplaySink() }),
+    ensureVadModel: (signal: AbortSignal) => ensureVadModel(signal),
+    createEndpointer: (modelPath: string, events: EndpointerEvents) => createEndpointer(modelPath, events),
+    ...(debug.enabled ? { log: (event: string, data?: Record<string, unknown>) => debug.log(event, data) } : {}),
   });
 
   function buildEnv(cmdCtx: ExtensionCommandContext): CommandEnv {
