@@ -10,6 +10,10 @@ function stateFile(dirOverride?: string): string {
   return dirOverride ? join(dirOverride, "state.json") : join(homedir(), STATE_REL);
 }
 
+export function stateDir(dirOverride?: string): string {
+  return dirname(stateFile(dirOverride));
+}
+
 function withDefaults(raw: unknown): VoicePreferences {
   const r = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
   return {

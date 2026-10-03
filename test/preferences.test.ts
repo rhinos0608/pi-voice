@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { loadPreferences, savePreferences, keyStatus, requireApiKey } from "../src/preferences.ts";
+import { loadPreferences, savePreferences, keyStatus, requireApiKey, stateDir } from "../src/preferences.ts";
 import { DEFAULT_PREFERENCES } from "../src/contracts.ts";
 
 function freshDir(): string {
@@ -106,6 +106,34 @@ describe("preferences", () => {
       );
       const { readdirSync } = await import("node:fs");
       assert.ok(!readdirSync(dir).includes("state.json"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("sendMode defaults to auto, round-trips review, and falls back on invalid values", async () => {
+    const dir = freshDir();
+    try {
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1 }));
+      const missing = await loadPreferences(dir);
+      assert.equal(missing.prefs.sendMode, "auto");
+      await savePreferences({ ...DEFAULT_PREFERENCES, sendMode: "review" }, dir);
+      const reloaded = await loadPreferences(dir);
+      assert.equal(reloaded.prefs.sendMode, "review");
+      assert.equal(reloaded.warning, undefined);
+      writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, sendMode: "bogus" }));
+      const invalid = await loadPreferences(dir);
+      assert.equal(invalid.prefs.sendMode, "auto");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stateDir returns the directory containing state.json", () => {
+    const dir = freshDir();
+    try {
+      assert.equal(stateDir(dir), dir);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
