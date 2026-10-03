@@ -11,6 +11,11 @@
       { "phrase": "HI PI", "tokens": "▁HI ▁PI" },
       { "phrase": "HI PIE", "tokens": "▁HI ▁PI E" },
       { "phrase": "HI PY", "tokens": "▁HI ▁P Y" }
+    ],
+    "send-to-pi": [
+      { "phrase": "SEND TO PI", "tokens": "▁S END ▁TO ▁PI" },
+      { "phrase": "SEND TO PIE", "tokens": "▁S END ▁TO ▁PI E" },
+      { "phrase": "SEND TO PY", "tokens": "▁S END ▁TO ▁P Y" }
     ]
   }
 }

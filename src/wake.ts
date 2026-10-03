@@ -116,10 +116,33 @@ function defaultCreateSpotter(config: SpotterConfig): SpotterLike {
   });
 }
 
+/** Phrase groups the spotter can report. */
+export type WakeGroup = "hey-pi" | "hi-pi" | "send-to-pi";
+
+export type WakeOptions = {
+  /** Add the "send-to-pi" group alongside the wake group(s). Default false. */
+  includeSend?: boolean;
+};
+
+function selectedGroups(choice: WakeChoice, options?: WakeOptions): WakeGroup[] {
+  const base: WakeGroup[] = choice === "both" ? ["hey-pi", "hi-pi"] : [choice as WakeGroup];
+  if (options?.includeSend && !base.includes("send-to-pi")) base.push("send-to-pi");
+  return base;
+}
+
 /** Pick token lines for the chosen wake group(s): bare tokens, one per line. */
-export function buildKeywordsFile(choice: WakeChoice, data: KeywordsJson): string {
-  const groups = choice === "both" ? [...data.groups["hey-pi"], ...data.groups["hi-pi"]] : [...data.groups[choice]];
-  return `${groups.map((e) => e.tokens).join("\n")}\n`;
+export function buildKeywordsFile(choice: WakeChoice, data: KeywordsJson, options?: WakeOptions): string {
+  const entries = selectedGroups(choice, options).flatMap((g) => data.groups[g] ?? []);
+  return `${entries.map((e) => e.tokens).join("\n")}\n`;
+}
+
+/** Map a spotter result keyword back to its group via keywords.json. */
+export function mapKeywordToGroup(keyword: string, data: KeywordsJson): WakeGroup | undefined {
+  const want = keyword.trim().toUpperCase();
+  for (const [group, entries] of Object.entries(data.groups)) {
+    if (entries.some((e) => e.phrase.toUpperCase() === want)) return group as WakeGroup;
+  }
+  return undefined;
 }
 
 /** Map a spotter result keyword back to its phrase via keywords.json. */
@@ -146,8 +169,9 @@ export function createWakeDetector(
   paths: ModelPaths,
   choice: WakeChoice,
   sensitivity: Sensitivity,
-  onWake: (phrase: string) => void,
+  onWake: (phrase: string, group: WakeGroup | undefined) => void,
   deps?: WakeDetectorDeps,
+  options?: WakeOptions,
 ): WakeDetector {
   const d = deps ?? {};
   const tuning = SENSITIVITY_CONFIG[sensitivity];
@@ -160,8 +184,8 @@ export function createWakeDetector(
   const data = JSON.parse(loadKeywordsJsonText(d)) as KeywordsJson;
   let keywordsFile = paths.keywordsFile;
   let tempFile: string | undefined;
-  if (choice !== "both") {
-    tempFile = writeFile(buildKeywordsFile(choice, data));
+  if (choice !== "both" || options?.includeSend) {
+    tempFile = writeFile(buildKeywordsFile(choice, data, options));
     keywordsFile = tempFile;
   }
 
@@ -193,10 +217,12 @@ export function createWakeDetector(
         const result = spotter.getResult(stream);
         if (!result.keyword) continue;
         spotter.reset(stream);
+        const phrase = mapKeywordToPhrase(result.keyword, data);
+        const group = mapKeywordToGroup(result.keyword, data);
         const at = now();
         if (at - lastFire >= refractoryMs) {
           lastFire = at;
-          onWake(mapKeywordToPhrase(result.keyword, data));
+          onWake(phrase, group);
         }
       }
     },

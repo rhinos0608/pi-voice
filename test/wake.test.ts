@@ -6,10 +6,12 @@ import { fileURLToPath } from "node:url";
 import {
   buildKeywordsFile,
   createWakeDetector,
+  mapKeywordToGroup,
   mapKeywordToPhrase,
   SENSITIVITY_CONFIG,
   type SpotterLike,
   type SpotterStream,
+  type WakeGroup,
 } from "../src/wake.ts";
 import type { ModelPaths } from "../src/contracts.ts";
 
@@ -177,6 +179,93 @@ test("close removes temp file and is idempotent", () => {
   det.close();
   det.close();
   assert.deepEqual(removed, ["/tmp/kws-tmp.txt"]);
+});
+
+test("send-to-pi group included only with includeSend", () => {
+  const without = buildKeywordsFile("hey-pi", KEYWORDS);
+  assert.ok(!without.includes("▁S END ▁TO"));
+  const withSend = buildKeywordsFile("hey-pi", KEYWORDS, { includeSend: true });
+  assert.ok(withSend.includes("▁HE Y ▁PI"));
+  assert.ok(withSend.includes("▁S END ▁TO ▁PI"));
+  assert.ok(withSend.includes("▁S END ▁TO ▁PI E"));
+  assert.ok(withSend.includes("▁S END ▁TO ▁P Y"));
+  assert.ok(withSend.endsWith("\n"));
+  const bothSend = buildKeywordsFile("both", KEYWORDS, { includeSend: true });
+  assert.ok(bothSend.includes("▁HE Y ▁PI") && bothSend.includes("▁HI ▁PI"));
+  assert.ok(bothSend.includes("▁S END ▁TO ▁PI"));
+  const hiSend = buildKeywordsFile("hi-pi", KEYWORDS, { includeSend: true });
+  assert.ok(hiSend.includes("▁HI ▁PI") && hiSend.includes("▁S END ▁TO ▁PI"));
+  assert.ok(!hiSend.includes("▁HE Y ▁PI"));
+});
+
+test("mapKeywordToGroup reports send-to-pi vs wake groups", () => {
+  assert.equal(mapKeywordToGroup("SEND TO PI", KEYWORDS), "send-to-pi");
+  assert.equal(mapKeywordToGroup("send to pie", KEYWORDS), "send-to-pi");
+  assert.equal(mapKeywordToGroup("SEND TO PY", KEYWORDS), "send-to-pi");
+  assert.equal(mapKeywordToGroup("HEY PI", KEYWORDS), "hey-pi");
+  assert.equal(mapKeywordToGroup("HI PI", KEYWORDS), "hi-pi");
+  assert.equal(mapKeywordToGroup("UNKNOWN WORDS", KEYWORDS), undefined);
+});
+
+test("detector reports group alongside phrase (send-to-pi)", () => {
+  const script: Script = { ready: true, keyword: "SEND TO PI" };
+  const phrases: string[] = [];
+  const groups: (WakeGroup | undefined)[] = [];
+  const written: string[] = [];
+  const det = createWakeDetector(
+    PATHS,
+    "hey-pi",
+    "normal",
+    (p, g) => {
+      phrases.push(p);
+      groups.push(g);
+    },
+    {
+      keywordsJsonText: KEYWORDS_TEXT,
+      createSpotter: () => fakeSpotter(script, { accepted: [], resets: 0 }),
+      writeKeywordsFile: (content) => {
+        written.push(content);
+        return "/tmp/fake-send.txt";
+      },
+      removeKeywordsFile: () => {},
+    },
+    { includeSend: true },
+  );
+  det.push(Buffer.alloc(64));
+  assert.deepEqual(phrases, ["SEND TO PI"]);
+  assert.deepEqual(groups, ["send-to-pi"]);
+  assert.ok(written[0]?.includes("▁S END ▁TO ▁PI"));
+  det.close();
+});
+
+test("both + includeSend writes temp file instead of reusing model file", () => {
+  const script: Script = { ready: false, keyword: "" };
+  let writes = 0;
+  let usedFile = "";
+  const det = createWakeDetector(
+    PATHS,
+    "both",
+    "normal",
+    () => {},
+    {
+      keywordsJsonText: KEYWORDS_TEXT,
+      createSpotter: (config) => {
+        usedFile = config.keywordsFile;
+        return fakeSpotter(script, { accepted: [], resets: 0 });
+      },
+      writeKeywordsFile: (content) => {
+        writes += 1;
+        assert.ok(content.includes("▁S END ▁TO ▁PI"));
+        return "/tmp/send-both.txt";
+      },
+      removeKeywordsFile: () => {},
+    },
+    { includeSend: true },
+  );
+  det.push(Buffer.alloc(64));
+  assert.equal(writes, 1);
+  assert.equal(usedFile, "/tmp/send-both.txt");
+  det.close();
 });
 
 test("mapKeywordToPhrase falls back to raw keyword", () => {
