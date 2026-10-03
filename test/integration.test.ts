@@ -587,6 +587,52 @@ describe("capture endpointing and delivery", () => {
     assert.equal(h.vadCalls(), 1);
   });
 
+  it("committed transcribing status is not overwritten by the capture meter", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.endpointers[0].end(1.3);
+    assert.equal(h.host.statuses.at(-1), "🎙 transcribing…");
+    const base = h.host.statuses.length;
+    // Late mic frames arrive while the transcript is pending; the throttled
+    // meter must not repaint over the committed status.
+    h.advance(150);
+    h.sources[0].emit(Buffer.from([9, 9, 9, 9]));
+    h.advance(150);
+    h.sources[0].emit(Buffer.from([9, 9, 9, 9]));
+    // Nor may a late partial transcript.
+    h.advance(150);
+    h.utterances[0].handlers.onPartial("late partial words");
+    assert.equal(h.host.statuses.length, base);
+    assert.equal(h.host.statuses.at(-1), "🎙 transcribing…");
+    // The utterance still resolves normally.
+    h.utterances[0].handlers.onFinal("done deal");
+    assert.deepEqual(h.host.sent[0], { text: "done deal", opts: undefined });
+  });
+
+  it("session start is logged once with the server message_type name", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.detectors[0].fire();
+    const u = h.utterances[0];
+    const sessionLogs = (): (string | undefined)[] =>
+      h.logs
+        .filter(
+          (l) =>
+            l.event === "stt-event" &&
+            typeof l.data?.["type"] === "string" &&
+            /session.started/.test(l.data["type"] as string),
+        )
+        .map((l) => l.data?.["type"] as string);
+    const before = sessionLogs().length;
+    u.handlers.onSession?.();
+    u.handlers.onEvent?.("session_started");
+    const after = sessionLogs();
+    assert.equal(after.length - before, 1);
+    assert.deepEqual(after.slice(-1), ["session_started"]);
+  });
+
   it("VAD end commits the utterance and transcribes", async () => {
     const h = makeHarness({});
     await h.controller.start();

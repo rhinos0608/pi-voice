@@ -380,6 +380,20 @@ describe("stt manual commits", () => {
     assert.ok(s.failures[0]?.message.includes("aborted"));
   });
 
+  it("reports session start exactly once, keeping the server message_type name", () => {
+    const s = setup();
+    s.socket.emit("open");
+    s.socket.serverMessage({ message_type: "session_started" });
+    const sessionEvents = s.events.filter(
+      (e) => e.type === "session_started" || e.type === "session-started",
+    );
+    assert.deepEqual(
+      sessionEvents.map((e) => e.type),
+      ["session_started"],
+    );
+    assert.equal(s.sessionCount.n, 1);
+  });
+
   it("fires onEvent for server messages and lifecycle without the key or transcript text", () => {
     const s = setup();
     openSession(s);

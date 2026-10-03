@@ -122,6 +122,7 @@ export class VoiceController {
   private noSpeechTimer: unknown = null;
   private micTimer: unknown = null;
   private submitted = false;
+  private committed = false;
   private endpointer: Endpointer | null = null;
   private vadPath: string | null = null;
   private speechHeard = false;
@@ -464,6 +465,7 @@ export class VoiceController {
 
   private maybeCaptureStatus(): void {
     if (this.phase !== "capture") return;
+    if (this.committed) return;
     if (this.now() - this.lastStatusAt < STATUS_THROTTLE_MS) return;
     this.lastStatusAt = this.now();
     this.host.setStatus(this.captureStatusText());
@@ -493,6 +495,7 @@ export class VoiceController {
     this.utterance = null;
     if (old) void old.close().catch(() => undefined);
     this.submitted = false;
+    this.committed = false;
     this.speechHeard = false;
     this.lastPartial = "";
     this.meter.reset();
@@ -503,7 +506,6 @@ export class VoiceController {
         onFinal: (text) => this.onFinal(text, gen),
         onFailure: (f) => this.onSttFailure(f, gen),
         onEnd: (info) => this.onEnd(info, gen),
-        onSession: () => this.log("stt-event", { type: "session-started" }),
         onEvent: (type, info) => this.logSttEvent(type, info),
       });
     } catch (err) {
@@ -545,6 +547,10 @@ export class VoiceController {
           } catch {
             // Commit failure surfaces via STT failure paths.
           }
+          // The utterance is committed: freeze the transcribing status until
+          // the utterance resolves. Late frames/partials must not repaint
+          // the capture meter over it.
+          this.committed = true;
           this.lastStatusAt = this.now();
           this.host.setStatus("🎙 transcribing…");
         },
@@ -646,6 +652,7 @@ export class VoiceController {
 
   private onPartial(text: string, gen: number): void {
     if (this.closed || gen !== this.generation || this.phase !== "capture") return;
+    if (this.committed) return;
     this.lastPartial = text.trim();
     this.maybeCaptureStatus();
   }
