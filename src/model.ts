@@ -231,6 +231,85 @@ export async function ensureWakeModel(signal: AbortSignal, deps?: ModelDeps): Pr
   }
 }
 
+export const VAD_MODEL_URL =
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx";
+// Pinned 2026-10-03: sha256 of the released silero_vad.onnx (643854 bytes).
+export const VAD_MODEL_SHA256 = "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6";
+export const VAD_MODEL_BYTES = 643854;
+/** Rejects oversized downloads; the model is ~0.6 MiB. */
+export const MAX_VAD_BYTES = 2 * 1024 * 1024;
+export const VAD_MODEL_NAME = "silero_vad.onnx";
+
+/** Cache path for the single-file Silero VAD model (same root the wake model uses). */
+export function vadModelPath(cacheRoot?: string): string {
+  return join(cacheRoot ?? defaultCacheRoot(), VAD_MODEL_NAME);
+}
+
+async function hashFile(path: string): Promise<string> {
+  return createHash("sha256").update(await readFile(path)).digest("hex");
+}
+
+/** True when the cache holds a size- and hash-valid copy of the VAD model. */
+export async function isVadModelProvisioned(cacheRoot?: string): Promise<boolean> {
+  const dest = vadModelPath(cacheRoot);
+  try {
+    if ((await stat(dest)).size !== VAD_MODEL_BYTES) return false;
+    return (await hashFile(dest)) === VAD_MODEL_SHA256;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Provision the Silero VAD model into the cache. Idempotent: returns
+ * immediately when a hash-valid copy is already present. Single-file
+ * download (no tar): streams with a size cap, verifies sha256, then
+ * moves a temp file into place atomically. Cleans up on failure.
+ */
+export async function ensureVadModel(signal: AbortSignal, deps?: ModelDeps): Promise<string> {
+  const cacheRoot = deps?.cacheRoot ?? defaultCacheRoot();
+  const dest = vadModelPath(cacheRoot);
+  const expected = deps?.expectedSha256 ?? VAD_MODEL_SHA256;
+  try {
+    const size = (await stat(dest)).size;
+    const sizeOk = deps?.expectedSha256 !== undefined || size === VAD_MODEL_BYTES;
+    if (sizeOk && (await hashFile(dest)) === expected) return dest;
+  } catch {
+    // Missing or invalid; download below.
+  }
+
+  const fetchImpl = deps?.fetchImpl ?? defaultFetch;
+  const maxBytes = deps?.maxBytes ?? MAX_VAD_BYTES;
+  const tmpBase = await mkTempDir();
+  try {
+    if (signal.aborted) throw new Error("VAD model provisioning aborted.");
+    const res = await fetchImpl(VAD_MODEL_URL, signal);
+    const hash = createHash("sha256");
+    let bytes = 0;
+    const chunks: Buffer[] = [];
+    for await (const chunk of res.body) {
+      if (signal.aborted) throw new Error("VAD model provisioning aborted.");
+      bytes += chunk.length;
+      if (bytes > maxBytes) throw new Error(`VAD model exceeds ${maxBytes} byte cap; aborting.`);
+      hash.update(chunk);
+      chunks.push(Buffer.from(chunk));
+    }
+    const digest = hash.digest("hex");
+    if (digest !== expected) throw new Error(`VAD model checksum mismatch: got ${digest}; refusing to install.`);
+    if (bytes !== VAD_MODEL_BYTES && deps?.expectedSha256 === undefined) {
+      throw new Error(`VAD model size mismatch: got ${bytes} bytes, want ${VAD_MODEL_BYTES}.`);
+    }
+    const tmp = join(tmpBase, VAD_MODEL_NAME);
+    await writeFile(tmp, Buffer.concat(chunks));
+    await mkdir(dirname(dest), { recursive: true });
+    const renameImpl = deps?.renameImpl ?? rename;
+    await renameImpl(tmp, dest);
+    return dest;
+  } finally {
+    await rm(tmpBase, { recursive: true, force: true });
+  }
+}
+
 async function mkTempDir(): Promise<string> {
   const { mkdtemp } = await import("node:fs/promises");
   return mkdtemp(join(tmpdir(), "pi-voice-model-"));

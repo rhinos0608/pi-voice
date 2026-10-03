@@ -5,7 +5,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { ensureWakeModel, isWakeModelProvisioned, WAKE_MODEL_SHA256, assertSafeMember } from "../src/model.ts";
+import { ensureWakeModel, isWakeModelProvisioned, WAKE_MODEL_SHA256, assertSafeMember, ensureVadModel, isVadModelProvisioned, VAD_MODEL_BYTES, VAD_MODEL_SHA256, vadModelPath } from "../src/model.ts";
 
 const FILES = [
   "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
@@ -201,5 +201,84 @@ describe("model", () => {
     } finally {
       rmSync(cacheRoot, { recursive: true, force: true });
     }
+  });
+});
+
+describe("vad model provisioning", () => {
+  it("downloads a single file and skips fetch when already provisioned", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pivoice-vad-"));
+    try {
+      let calls = 0;
+      const countingFetch = async () => {
+        calls += 1;
+        return fakeFetch()();
+      };
+      const deps = { ...baseDeps(cacheRoot, fakeTar([])), fetchImpl: countingFetch };
+      const dest = await ensureVadModel(new AbortController().signal, deps);
+      assert.equal(dest, vadModelPath(cacheRoot));
+      assert.deepEqual(await readFile(dest), Buffer.from(PAYLOAD));
+      assert.equal(calls, 1);
+      assert.equal(await ensureVadModel(new AbortController().signal, deps), dest);
+      assert.equal(calls, 1);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reports provisioned state by size and hash", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pivoice-vad-state-"));
+    try {
+      assert.equal(await isVadModelProvisioned(cacheRoot), false);
+      writeFileSync(vadModelPath(cacheRoot), "wrong");
+      assert.equal(await isVadModelProvisioned(cacheRoot), false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves no file behind on sha mismatch", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pivoice-vad-bad-"));
+    try {
+      const deps = { ...baseDeps(cacheRoot, fakeTar([])), expectedSha256: WAKE_MODEL_SHA256 };
+      await assert.rejects(() => ensureVadModel(new AbortController().signal, deps), /checksum mismatch/);
+      assert.equal(existsSync(vadModelPath(cacheRoot)), false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces the size cap", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pivoice-vad-cap-"));
+    try {
+      const deps = { ...baseDeps(cacheRoot, fakeTar([])), maxBytes: 4 };
+      await assert.rejects(() => ensureVadModel(new AbortController().signal, deps), /exceeds/);
+      assert.equal(existsSync(vadModelPath(cacheRoot)), false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("honors abort without fetching", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pivoice-vad-abort-"));
+    try {
+      let calls = 0;
+      const countingFetch = async () => {
+        calls += 1;
+        return fakeFetch()();
+      };
+      const controller = new AbortController();
+      controller.abort();
+      const deps = { ...baseDeps(cacheRoot, fakeTar([])), fetchImpl: countingFetch };
+      await assert.rejects(() => ensureVadModel(controller.signal, deps), /abort/i);
+      assert.equal(calls, 0);
+      assert.equal(existsSync(vadModelPath(cacheRoot)), false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("exposes pinned metadata matching the released model", () => {
+    assert.equal(VAD_MODEL_BYTES, 643854);
+    assert.equal(VAD_MODEL_SHA256, "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6");
   });
 });
