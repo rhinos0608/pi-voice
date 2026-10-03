@@ -84,8 +84,11 @@ describe("parser", () => {
     assert.deepEqual(parseVoiceArgs("status"), { sub: "status" });
     assert.deepEqual(parseVoiceArgs("tts on"), { sub: "tts", value: "on" });
     assert.deepEqual(parseVoiceArgs("mic"), { sub: "mic", value: undefined });
-    assert.deepEqual(parseVoiceArgs("voice"), { sub: "voice", value: undefined });
-    assert.deepEqual(parseVoiceArgs("bogus"), { sub: "help" });
+    assert.deepEqual(parseVoiceArgs("list"), { sub: "list", value: undefined });
+    assert.deepEqual(parseVoiceArgs("voice-abc123"), { sub: "id", value: "voice-abc123" });
+    assert.deepEqual(parseVoiceArgs("id voice-abc123"), { sub: "id", value: "voice-abc123" });
+    assert.deepEqual(parseVoiceArgs("voice"), { sub: "id", value: "voice" });
+    assert.deepEqual(parseVoiceArgs("bogus"), { sub: "id", value: "bogus" });
   });
 });
 
@@ -108,10 +111,21 @@ describe("completions", () => {
 
   it("voice completions show names and insert ids", async () => {
     const { env } = makeEnv();
-    const items = await getVoiceCompletions("voice ra", env);
-    assert.equal(items?.length, 1);
-    assert.equal(items?.[0].value, "voice-abc123");
-    assert.ok(items?.[0].label.includes("Rachel"));
+    for (const prefix of ["list ra", "id ra"]) {
+      const items = await getVoiceCompletions(prefix, env);
+      assert.equal(items?.length, 1, prefix);
+      assert.equal(items?.[0].value, "voice-abc123");
+      assert.ok(items?.[0].label.includes("Rachel"));
+    }
+  });
+
+  it("bare partial id completes matching voices", async () => {
+    const { env } = makeEnv();
+    const items = await getVoiceCompletions("voice-ab", env);
+    assert.ok(items?.some((i) => i.value === "voice-abc123"), JSON.stringify(items));
+    const bare = await getVoiceCompletions("", env);
+    assert.ok(bare?.some((i) => i.value === "list"), JSON.stringify(bare));
+    assert.ok(bare?.some((i) => i.value === "voice-abc123"), JSON.stringify(bare));
   });
 
   it("model completions fall back offline without a key", async () => {
@@ -155,7 +169,7 @@ describe("handler", () => {
     bag.setKey(undefined);
     const ctx = ctxFor(bag.notified);
     await handleVoiceCommand("on", ctx, bag.env);
-    await handleVoiceCommand("voice", ctx, bag.env);
+    await handleVoiceCommand("list", ctx, bag.env);
     await handleVoiceCommand("tts on", ctx, bag.env);
     assert.ok(bag.notified.length >= 3);
     for (const n of bag.notified) assert.equal(n.message, MISSING_KEY_MESSAGE);
@@ -173,6 +187,24 @@ describe("handler", () => {
     const { env, prefs, notified } = makeEnv();
     await handleVoiceCommand('mic "iPhone Microphone"', ctxFor(notified), env);
     assert.deepEqual(prefs.mic, { kind: "named", name: "iPhone Microphone" });
+  });
+
+  it("bare id saves without a key", async () => {
+    const bag = makeEnv();
+    bag.setKey(undefined);
+    const ctx = ctxFor(bag.notified);
+    await handleVoiceCommand("voice-abc123", ctx, bag.env);
+    assert.equal(bag.prefs.voiceId, "voice-abc123");
+    assert.equal(bag.saved.length, 1);
+    assert.ok(bag.notified.some((n) => n.message === "voice: voice-abc123"));
+  });
+
+  it("id alias saves without a key", async () => {
+    const bag = makeEnv();
+    bag.setKey(undefined);
+    const ctx = ctxFor(bag.notified);
+    await handleVoiceCommand("id voice-abc123", ctx, bag.env);
+    assert.equal(bag.prefs.voiceId, "voice-abc123");
   });
 
   it("test tts warns that it is billable", async () => {

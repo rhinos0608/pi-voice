@@ -42,7 +42,7 @@ Then inside Pi:
 ```
 /voice setup   # checks ffmpeg/ffplay, provisions the wake model, mic help
 /voice on      # enable the mic for this session
-/voice tts on  # needs a selected voice: /voice voice <id>
+/voice tts on  # needs a selected voice: /voice <voice-id>
 ```
 
 ## Command reference
@@ -53,7 +53,9 @@ Then inside Pi:
 | `/voice on`, `/voice off` | Start/stop wake listening for this session |
 | `/voice setup` | Check binaries/env, provision the wake model, mic-permission guidance. Does not enable the mic |
 | `/voice tts on\|off` | Session speech toggle (saved); `on` needs key + voice |
-| `/voice voice [id]` | List ElevenLabs voices or select one by id |
+| `/voice list` | List ElevenLabs voices (needs key) |
+| `/voice <voice-id>` | Select the TTS voice by id (saved, no key needed) |
+| `/voice id <id>` | Select the TTS voice by id (explicit form) |
 | `/voice model [id]` | List or select the TTS model (default `eleven_v4_turbo`) |
 | `/voice wake hey-pi\|hi-pi\|both` | Which phrases the local spotter listens for |
 | `/voice sensitivity low\|normal\|high` | Detection strictness (default `normal`) |
@@ -77,7 +79,7 @@ Then inside Pi:
   System Settings → Privacy & Security → Microphone, then restart Pi.
 - **`Export ELEVENLABS_API_KEY and restart Pi`:** the key is read at session
   start; exporting it mid-session is not enough.
-- **`/voice test tts` fails:** needs key + selected voice (`/voice voice`).
+- **`/voice test tts` fails:** needs key + selected voice (`/voice list` to browse).
 - **No wake word heard:** try `/voice sensitivity high`, or
   `/voice test wake` to check detection without submitting anything.
 

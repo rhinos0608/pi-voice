@@ -49,7 +49,8 @@ One registered `/voice` command; parser and context-aware `getArgumentCompletion
 | `/voice on`, `/voice off` | Start/stop current-session wake listening; autocomplete `on`, `off`. |
 | `/voice setup` | Check binaries/env, provision verified KWS model, report permission instructions; **does not enable mic**. |
 | `/voice tts on\|off` | Session-only TTS toggle; `on` requires key and selected voice. |
-| `/voice voice <id>` | Fetch `/v2/voices` with `page_size=100`, follow `next_page_token` with page cap; autocomplete entries show name and ID suffix, insert **ID** to avoid duplicate-name ambiguity. `/voice voice` lists bounded selection/help. |
+| `/voice list` | Fetch `/v2/voices` with `page_size=100`, follow `next_page_token` with page cap; autocomplete entries show name and ID suffix, insert **ID** to avoid duplicate-name ambiguity. Lists bounded selection/help. |
+| `/voice <voice-id>` or `/voice id <id>` | Save the voice ID directly (no key needed to save); partial IDs complete from the voice list when the key is present. |
 | `/voice wake hey-pi\|hi-pi\|both` | Select only bundled, verified BPE tokenized phrases; default `both`. No arbitrary phrase promise. |
 | `/voice sensitivity low\|normal\|high` | Predefined KWS thresholds, default `normal`; tune with recordings, not invented documented defaults. |
 | `/voice mic list\|default\|<device>` | Parse FFmpeg device listing; autocomplete discovered device IDs with names. Persist name and fail clearly if later missing/ambiguous rather than silently selecting another mic. |

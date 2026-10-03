@@ -40,7 +40,7 @@ export type CommandEnv = {
 export type ParsedVoiceCommand =
   | { sub: "status" | "on" | "off" | "setup" | "help" }
   | { sub: "tts" | "autostart"; value?: string }
-  | { sub: "voice" | "model" | "wake" | "sensitivity" | "mic" | "test"; value?: string };
+  | { sub: "model" | "wake" | "sensitivity" | "mic" | "test" | "list" | "id"; value?: string };
 
 /** Split raw slash args into a subcommand and its remainder. */
 export function parseVoiceArgs(args: string): ParsedVoiceCommand {
@@ -59,15 +59,16 @@ export function parseVoiceArgs(args: string): ParsedVoiceCommand {
       return { sub: head };
     case "tts":
     case "autostart":
-    case "voice":
+    case "list":
     case "model":
     case "wake":
     case "sensitivity":
     case "mic":
     case "test":
+    case "id":
       return { sub: head, value };
     default:
-      return { sub: "help" };
+      return { sub: "id", value: args.trim() };
   }
 }
 
@@ -84,8 +85,28 @@ const SUBCOMMANDS = [
   "mic",
   "autostart",
   "test",
+  "list",
+  "id",
   "help",
 ];
+
+async function matchVoices(
+  env: Pick<CommandEnv, "listVoices">,
+  key: string,
+  current: string,
+): Promise<AutocompleteItem[] | null> {
+  let voices: VoiceEntry[];
+  try {
+    voices = await env.listVoices(key);
+  } catch {
+    return null;
+  }
+  const needle = current.toLowerCase().replace(/^"|"$/g, "");
+  return voices
+    .filter((v) => v.name.toLowerCase().includes(needle) || v.id.toLowerCase().includes(needle))
+    .slice(0, 20)
+    .map((v) => ({ value: v.id, label: `${v.name} (…${v.id.slice(-6)})` }));
+}
 
 function tokenize(input: string): { tokens: string[]; trailingSpace: boolean } {
   const trailingSpace = /\s$/.test(input);
@@ -113,7 +134,13 @@ export async function getVoiceCompletions(
 
   if (completingFirst) {
     const hits = SUBCOMMANDS.filter((s) => s.startsWith(current.toLowerCase()));
-    return hits.map((value) => ({ value, label: value }));
+    const items = hits.map((value) => ({ value, label: value }));
+    const key = env.getKey();
+    if (key && !hits.includes(current.toLowerCase())) {
+      const voices = await matchVoices(env, key, current);
+      if (voices) items.push(...voices);
+    }
+    return items;
   }
 
   const completeValues = (options: string[]): AutocompleteItem[] | null => {
@@ -151,20 +178,12 @@ export async function getVoiceCompletions(
       const hits = [...base, ...names].filter((o) => o.replace(/^"/, "").toLowerCase().startsWith(needle));
       return hits.map((value) => ({ value, label: value }));
     }
-    case "voice": {
+    case "list":
+    case "id": {
       const key = env.getKey();
       if (!key) return null;
-      let voices: VoiceEntry[];
-      try {
-        voices = await env.listVoices(key);
-      } catch {
-        return null;
-      }
-      const needle = current.toLowerCase().replace(/^"|"$/g, "");
-      return voices
-        .filter((v) => v.name.toLowerCase().includes(needle) || v.id.toLowerCase().includes(needle))
-        .slice(0, 20)
-        .map((v) => ({ value: v.id, label: `${v.name} (…${v.id.slice(-6)})` }));
+      const voices = await matchVoices(env, key, current);
+      return voices;
     }
     case "model": {
       const key = env.getKey();
@@ -263,7 +282,9 @@ export async function handleVoiceCommand(
         [
           "/voice status|on|off|setup|help",
           "/voice tts on|off — session speech, requires key + voice",
-          "/voice voice [id] — list or select ElevenLabs voice",
+          "/voice list — list ElevenLabs voices (needs key)",
+          "/voice <voice-id> — select ElevenLabs voice (saved, no key needed)",
+          "/voice id <id> — select ElevenLabs voice by id",
           "/voice model [id] — list or select TTS model",
           "/voice wake hey-pi|hi-pi|both",
           "/voice sensitivity low|normal|high",
@@ -286,7 +307,7 @@ export async function handleVoiceCommand(
         const key = needKey();
         if (!key) return;
         if (!env.getPrefs().voiceId) {
-          ctx.notify("Select a voice first: /voice voice <id>.", "warning");
+          ctx.notify("Select a voice first: /voice <voice-id>.", "warning");
           return;
         }
       }
@@ -309,10 +330,11 @@ export async function handleVoiceCommand(
       ctx.notify(`autostart ${next.autostart ? "on" : "off"}`, "info");
       return;
     }
-    case "voice": {
-      const key = needKey();
-      if (!key) return;
-      if (!parsed.value) {
+    case "list":
+    case "id": {
+      if (!parsed.value || parsed.sub === "list") {
+        const key = needKey();
+        if (!key) return;
         let voices: VoiceEntry[];
         try {
           voices = await env.listVoices(key);
@@ -321,7 +343,7 @@ export async function handleVoiceCommand(
           return;
         }
         const lines = voices.slice(0, 10).map((v) => `  ${v.name} — ${v.id}`);
-        ctx.notify(["Select with /voice voice <id>:", ...lines].join("\n"), "info");
+        ctx.notify(["Select with /voice <voice-id>:", ...lines].join("\n"), "info");
         return;
       }
       const id = unquote(parsed.value);
@@ -435,7 +457,7 @@ export async function handleVoiceCommand(
         const key = needKey();
         if (!key) return;
         if (!env.getPrefs().voiceId) {
-          ctx.notify("Select a voice first: /voice voice <id>.", "warning");
+          ctx.notify("Select a voice first: /voice <voice-id>.", "warning");
           return;
         }
         ctx.notify("Note: /voice test tts is billable.", "warning");
