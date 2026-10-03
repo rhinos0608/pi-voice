@@ -11,11 +11,12 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_PREFERENCES, type ModelPaths, type VoicePreferences } from "./contracts.ts";
+import { DEFAULT_PREFERENCES, type ModelPaths, type VoiceFailure, type VoicePreferences } from "./contracts.ts";
 import { VoiceController, type VoiceHost } from "./controller.ts";
 import { createDebugLog } from "./debuglog.ts";
+import { analyzePcm, classifyCapture } from "./level.ts";
 import { createAvFoundationSource, FFMPEG_PATH, listMicrophones } from "./mic.ts";
-import { ensureVadModel, ensureWakeModel, isWakeModelProvisioned } from "./model.ts";
+import { ensureVadModel, ensureWakeModel, isVadModelProvisioned, isWakeModelProvisioned } from "./model.ts";
 import { createFfplaySink, FFPLAY_PATH } from "./player.ts";
 import { keyStatus, loadPreferences, savePreferences } from "./preferences.ts";
 import { startUtterance } from "./stt.ts";
@@ -39,20 +40,34 @@ function checkBinary(path: string): Promise<boolean> {
   });
 }
 
-async function runLiveTest(kind: "mic" | "wake" | "tts", prefs: VoicePreferences): Promise<string> {
+async function runLiveTest(kind: "mic" | "wake" | "tts" | "stt", prefs: VoicePreferences): Promise<string> {
   if (kind === "mic") {
-    const devices = await listMicrophones();
     const source = createAvFoundationSource(prefs.mic);
-    let bytes = 0;
+    const chunks: Buffer[] = [];
+    const micState: { error: Error | null } = { error: null };
     await source.start(
       (chunk) => {
-        bytes += chunk.length;
+        chunks.push(chunk);
       },
-      () => {},
+      (err) => {
+        micState.error = err;
+      },
     );
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await new Promise((resolve) => setTimeout(resolve, 2000));
     await source.stop();
-    return `mic test: captured ${bytes} bytes in ~1 s from ${devices.length} device(s).`;
+    if (micState.error) throw new Error(micState.error.message);
+    const stats = analyzePcm(Buffer.concat(chunks));
+    const health = classifyCapture(stats);
+    if (health === "silent-zero") {
+      return "mic test: pure digital silence — macOS is denying microphone access to this terminal (System Settings › Privacy & Security › Microphone).";
+    }
+    const peak = stats.peakDbfs.toFixed(1);
+    if (health === "very-quiet") {
+      return `mic test: very quiet (peak ${peak} dBFS) — check the input device or gain.`;
+    }
+    const device = prefs.mic.kind === "named" ? prefs.mic.name : "default";
+    const rms = stats.rmsDbfs.toFixed(1);
+    return `mic test: ${device} · level ${rms} dBFS (peak ${peak}) · ok`;
   }
   if (kind === "wake") {
     const abort = new AbortController();
@@ -77,6 +92,103 @@ async function runLiveTest(kind: "mic" | "wake" | "tts", prefs: VoicePreferences
       return heard === null ? "wake test: no wake word heard in ~10 s." : `wake test: heard "${heard}".`;
     } finally {
       clearTimeout(timer);
+    }
+  }
+  if (kind === "stt") {
+    const sttKey = process.env["ELEVENLABS_API_KEY"];
+    if (!sttKey) throw new Error("STT test needs a key.");
+    const modelPath = await ensureVadModel(new AbortController().signal);
+    const source = createAvFoundationSource(prefs.mic);
+    let speechStarted = false;
+    let commitAt = 0;
+    let lastFinal = "";
+    let endSource: "committed" | "partial-fallback" | undefined;
+    let endText = "";
+    const failureState: { failure: VoiceFailure | null } = { failure: null };
+    const sttMicState: { error: Error | null } = { error: null };
+    let settled = false;
+    let resolveOutcome: () => void = () => {};
+    const outcome = new Promise<void>((resolve) => {
+      resolveOutcome = resolve;
+    });
+    const settle = (): void => {
+      if (!settled) {
+        settled = true;
+        resolveOutcome();
+      }
+    };
+    const endpointer = createEndpointer(modelPath, {
+      onSpeechStart: () => {
+        speechStarted = true;
+      },
+      onSpeechEnd: () => {
+        if (commitAt === 0) commitAt = Date.now();
+        try {
+          utterance.commit();
+        } catch {
+          // Commit failure surfaces via STT failure paths.
+        }
+      },
+    });
+    const utterance = startUtterance(sttKey, {
+      onPartial: () => {},
+      onFinal: (text) => {
+        lastFinal = text;
+      },
+      onFailure: (f) => {
+        failureState.failure = f;
+        settle();
+      },
+      onEnd: (info) => {
+        endText = info.text;
+        endSource = info.source;
+        if (info.reason === "final" && info.text.trim() !== "") lastFinal = info.text;
+        settle();
+      },
+    });
+    try {
+      await source.start(
+        (chunk) => {
+          endpointer.push(chunk);
+          utterance.push(chunk);
+        },
+        (err) => {
+          sttMicState.error = err;
+          settle();
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 8000));
+      function throwIfTestFailed(): void {
+        const micErr = sttMicState.error;
+        if (micErr) throw new Error(micErr.message);
+        const sttFailed = failureState.failure;
+        if (sttFailed) throw new Error(`stt test failed (${sttFailed.code}): ${sttFailed.message}`);
+      }
+      throwIfTestFailed();
+      if (speechStarted && commitAt === 0) {
+        commitAt = Date.now();
+        try {
+          utterance.commit();
+        } catch {
+          // Commit failure surfaces via STT failure paths.
+        }
+      }
+      if (speechStarted && !settled) {
+        await Promise.race([outcome, new Promise((resolve) => setTimeout(resolve, 8000))]);
+      }
+      throwIfTestFailed();
+      const transcript = (endText.trim() !== "" ? endText : lastFinal).trim();
+      if (transcript !== "") {
+        const ms = commitAt === 0 ? 0 : Date.now() - commitAt;
+        const fallback = endSource === "partial-fallback" ? " [partial fallback]" : "";
+        return `stt test: "${transcript}" (commit → final ${ms} ms)${fallback}`;
+      }
+      if (!speechStarted) return "stt test: no speech detected in 8 s.";
+      return "stt test: speech heard but no transcript.";
+    } finally {
+      await source.stop().catch(() => undefined);
+      endpointer.close();
+      await utterance.close().catch(() => undefined);
     }
   }
   const key = process.env["ELEVENLABS_API_KEY"];
@@ -163,7 +275,9 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       keyPresent: () => keyStatus().present,
       keyLast4: () => keyStatus().last4,
       isProvisioned: () => isWakeModelProvisioned(),
+      isVadProvisioned: () => isVadModelProvisioned(),
       ensureModel: (signal) => ensureWakeModel(signal),
+      ensureVadModel: (signal) => ensureVadModel(signal),
       hasFfmpeg: () => checkBinary(FFMPEG_PATH),
       hasFfplay: () => checkBinary(FFPLAY_PATH),
       listDevices: () => listMicrophones(),

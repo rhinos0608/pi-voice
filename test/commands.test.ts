@@ -47,6 +47,8 @@ function makeEnv(overrides?: { prefs?: Partial<VoicePreferences>; key?: string }
     keyLast4: () => (key ? key.slice(-4) : undefined),
     isProvisioned: async () => true,
     ensureModel: async () => ({}),
+    isVadProvisioned: async () => true,
+    ensureVadModel: async () => "/tmp/vad.onnx",
     hasFfmpeg: async () => true,
     hasFfplay: async () => true,
     listDevices: async () => [{ name: "MacBook Pro Microphone", index: 0 }, { name: "iPhone Microphone", index: 1 }],
@@ -149,6 +151,25 @@ describe("completions", () => {
     await getVoiceCompletions("sensitivity h", probe);
     assert.equal(fetched, false);
   });
+
+  it("test values include stt and send completes auto|review", async () => {
+    const { env } = makeEnv();
+    const kinds = await getVoiceCompletions("test ", env);
+    assert.deepEqual(
+      kinds?.map((h) => h.value).sort(),
+      ["mic", "stt", "tts", "wake"],
+    );
+    const modes = await getVoiceCompletions("send ", env);
+    assert.deepEqual(
+      modes?.map((h) => h.value).sort(),
+      ["auto", "review"],
+    );
+  });
+
+  it("parses send as a subcommand, not a voice id", () => {
+    assert.deepEqual(parseVoiceArgs("send review"), { sub: "send", value: "review" });
+    assert.deepEqual(parseVoiceArgs("send"), { sub: "send", value: undefined });
+  });
 });
 
 describe("handler", () => {
@@ -212,5 +233,66 @@ describe("handler", () => {
     prefs.voiceId = "voice-abc123";
     await handleVoiceCommand("test tts", ctxFor(notified), env);
     assert.ok(notified.some((n) => /billable/.test(n.message)));
+  });
+
+  it("send reports the current mode with no value, sets it, and rejects junk", async () => {
+    const { env, prefs, notified } = makeEnv();
+    let restarts = 0;
+    const origRestart = env.controller.restartIfListening.bind(env.controller);
+    env.controller.restartIfListening = async () => {
+      restarts++;
+      await origRestart();
+    };
+    await handleVoiceCommand("send", ctxFor(notified), env);
+    assert.ok(notified.some((n) => n.message === "send mode: auto"));
+    await handleVoiceCommand("send review", ctxFor(notified), env);
+    assert.equal(prefs.sendMode, "review");
+    assert.ok(notified.some((n) => n.message === "send mode: review"));
+    assert.equal(restarts, 1);
+    await handleVoiceCommand("send fast", ctxFor(notified), env);
+    assert.ok(notified.some((n) => /Usage: \/voice send auto\|review/.test(n.message)));
+    assert.equal(prefs.sendMode, "review");
+  });
+
+  it("status shows the send mode", async () => {
+    const { env, notified } = makeEnv();
+    await handleVoiceCommand("status", ctxFor(notified), env);
+    assert.ok(notified.some((n) => /send mode: auto/.test(n.message)));
+  });
+
+  it("test stt prompts, then reports the transcript", async () => {
+    const { env, notified } = makeEnv();
+    await handleVoiceCommand("test stt", ctxFor(notified), env);
+    assert.ok(notified.some((n) => /stt test: speak now/.test(n.message)));
+    assert.ok(notified.some((n) => n.message === "stt ok"));
+  });
+
+  it("test stt requires a key and reports failures", async () => {
+    const bag = makeEnv({ key: undefined });
+    bag.setKey(undefined);
+    await handleVoiceCommand("test stt", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => n.message === MISSING_KEY_MESSAGE));
+    const failing = makeEnv();
+    failing.env.runTest = async () => {
+      throw new Error("boom");
+    };
+    await handleVoiceCommand("test stt", ctxFor(failing.notified), failing.env);
+    assert.ok(failing.notified.some((n) => /Test failed: boom/.test(n.message)));
+  });
+
+  it("setup provisions the vad model alongside the wake model", async () => {
+    const { env, notified } = makeEnv();
+    await handleVoiceCommand("setup", ctxFor(notified), env);
+    const text = notified.map((n) => n.message).join("\n");
+    assert.ok(text.includes("wake model: provisioned"));
+    assert.ok(text.includes("vad model: provisioned"));
+  });
+
+  it("help lists send and the review-mode line", async () => {
+    const { env, notified } = makeEnv();
+    await handleVoiceCommand("help", ctxFor(notified), env);
+    const text = notified.map((n) => n.message).join("\n");
+    assert.ok(text.includes("/voice send auto|review"));
+    assert.ok(text.includes('"hey pi, send" also works'));
   });
 });

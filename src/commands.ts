@@ -28,18 +28,20 @@ export type CommandEnv = {
   keyLast4: () => string | undefined;
   isProvisioned: () => Promise<boolean>;
   ensureModel: (signal: AbortSignal) => Promise<unknown>;
+  isVadProvisioned: () => Promise<boolean>;
+  ensureVadModel: (signal: AbortSignal) => Promise<string>;
   hasFfmpeg: () => Promise<boolean>;
   hasFfplay: () => Promise<boolean>;
   listDevices: () => Promise<MicDevice[]>;
   listVoices: (key: string) => Promise<VoiceEntry[]>;
   listModels: (key: string) => Promise<string[]>;
   getKey: () => string | undefined;
-  runTest: (kind: "mic" | "wake" | "tts") => Promise<string>;
+  runTest: (kind: "mic" | "wake" | "tts" | "stt") => Promise<string>;
 };
 
 export type ParsedVoiceCommand =
   | { sub: "status" | "on" | "off" | "setup" | "help" }
-  | { sub: "tts" | "autostart"; value?: string }
+  | { sub: "tts" | "autostart" | "send"; value?: string }
   | { sub: "model" | "wake" | "sensitivity" | "mic" | "test" | "list" | "id"; value?: string };
 
 /** Split raw slash args into a subcommand and its remainder. */
@@ -59,6 +61,7 @@ export function parseVoiceArgs(args: string): ParsedVoiceCommand {
       return { sub: head };
     case "tts":
     case "autostart":
+    case "send":
     case "list":
     case "model":
     case "wake":
@@ -84,6 +87,7 @@ const SUBCOMMANDS = [
   "sensitivity",
   "mic",
   "autostart",
+  "send",
   "test",
   "list",
   "id",
@@ -163,8 +167,10 @@ export async function getVoiceCompletions(
       return completeValues(["hey-pi", "hi-pi", "both"]);
     case "sensitivity":
       return completeValues(["low", "normal", "high"]);
+    case "send":
+      return completeValues(["auto", "review"]);
     case "test":
-      return completeValues(["mic", "wake", "tts"]);
+      return completeValues(["mic", "wake", "tts", "stt"]);
     case "mic": {
       const base = ["list", "default"];
       let devices: MicDevice[] = [];
@@ -217,6 +223,7 @@ function prefsSummary(prefs: VoicePreferences, keyPresent: boolean, last4: strin
     `  voice: ${prefs.voiceId ?? "(none)"}`,
     `  tts model: ${prefs.ttsModel ?? DEFAULT_TTS_MODEL}`,
     `  autostart: ${prefs.autostart ? "on" : "off"}`,
+    `  send mode: ${prefs.sendMode}`,
     `  key: ${keyPresent ? `present ••••${last4 ?? "????"}` : "missing"}`,
   ].join("\n");
 }
@@ -272,6 +279,12 @@ export async function handleVoiceCommand(
       } catch (err) {
         lines.push(`wake model: failed — ${err instanceof Error ? err.message : String(err)}`);
       }
+      try {
+        await env.ensureVadModel(new AbortController().signal);
+        lines.push("vad model: provisioned");
+      } catch (err) {
+        lines.push(`vad model: failed — ${err instanceof Error ? err.message : String(err)}`);
+      }
       lines.push("mic permission: grant the terminal app Microphone access in System Settings > Privacy & Security > Microphone, then restart.");
       lines.push("setup does not enable the mic; run /voice on when ready.");
       ctx.notify(lines.join("\n"), "info");
@@ -280,7 +293,7 @@ export async function handleVoiceCommand(
     case "help": {
       ctx.notify(
         [
-          "/voice status|on|off|setup|help",
+          "/voice status|on|off|setup|send|help",
           "/voice tts on|off — session speech, requires key + voice",
           "/voice list — list ElevenLabs voices (needs key)",
           "/voice <voice-id> — select ElevenLabs voice (saved, no key needed)",
@@ -290,7 +303,8 @@ export async function handleVoiceCommand(
           "/voice sensitivity low|normal|high",
           "/voice mic list|default|<name> — names with spaces may be quoted",
           "/voice autostart on|off",
-          "/voice test mic|wake|tts — tts is billable",
+          '/voice send auto|review — review: dictation goes to the editor; Enter or "send to pi" submits; "hey pi, send" also works',
+          "/voice test mic|wake|tts|stt — tts is billable",
           "Privacy: post-wake audio and assistant prose go to ElevenLabs; wake detection is local.",
         ].join("\n"),
         "info",
@@ -328,6 +342,23 @@ export async function handleVoiceCommand(
         p.autostart = value === "on";
       });
       ctx.notify(`autostart ${next.autostart ? "on" : "off"}`, "info");
+      return;
+    }
+    case "send": {
+      const value = parsed.value?.toLowerCase();
+      if (!value) {
+        ctx.notify(`send mode: ${env.getPrefs().sendMode}`, "info");
+        return;
+      }
+      if (value !== "auto" && value !== "review") {
+        ctx.notify("Usage: /voice send auto|review", "warning");
+        return;
+      }
+      const next = await env.mutatePrefs((p) => {
+        p.sendMode = value;
+      });
+      await env.controller.restartIfListening();
+      ctx.notify(`send mode: ${next.sendMode}`, "info");
       return;
     }
     case "list":
@@ -449,8 +480,8 @@ export async function handleVoiceCommand(
     }
     case "test": {
       const value = parsed.value?.toLowerCase();
-      if (value !== "mic" && value !== "wake" && value !== "tts") {
-        ctx.notify("Usage: /voice test mic|wake|tts", "warning");
+      if (value !== "mic" && value !== "wake" && value !== "tts" && value !== "stt") {
+        ctx.notify("Usage: /voice test mic|wake|tts|stt", "warning");
         return;
       }
       if (value === "tts") {
@@ -461,6 +492,11 @@ export async function handleVoiceCommand(
           return;
         }
         ctx.notify("Note: /voice test tts is billable.", "warning");
+      }
+      if (value === "stt") {
+        const key = needKey();
+        if (!key) return;
+        ctx.notify("stt test: speak now (up to 8 s)…", "info");
       }
       if (value === "wake") ctx.notify("Listening up to ~10 s for the wake word; nothing is submitted.", "info");
       try {
