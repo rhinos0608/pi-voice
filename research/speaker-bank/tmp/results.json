@@ -1,0 +1,3542 @@
+{
+ "voices": [
+  "Samantha",
+  "Karen",
+  "Moira",
+  "Daniel"
+ ],
+ "caps": [
+  0,
+  16,
+  40,
+  64,
+  128,
+  256
+ ],
+ "rival": {
+  "Samantha": {
+   "voice": "Karen",
+   "enrollMean": 0.585
+  },
+  "Karen": {
+   "voice": "Samantha",
+   "enrollMean": 0.618
+  },
+  "Moira": {
+   "voice": "Karen",
+   "enrollMean": 0.415
+  },
+  "Daniel": {
+   "voice": "Moira",
+   "enrollMean": 0.341
+  }
+ },
+ "perOwner": {
+  "Samantha": {
+   "enrollThreshold": 0.832,
+   "caps": {
+    "0": {
+     "finalThreshold": 0.832,
+     "learnedEvents": 0,
+     "bankSize": 0,
+     "bank": {},
+     "reasons": {
+      "skipped": 312
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 50,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 75,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 100,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 125,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 150,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 175,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 200,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 225,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 250,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 275,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 300,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 312,
+       "thr": 0.832,
+       "learned": 0
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.667,
+       "muffled": 0.667,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.667,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 0.667,
+       "phone": 0,
+       "muffled": 0,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     }
+    },
+    "16": {
+     "finalThreshold": 0.85,
+     "learnedEvents": 139,
+     "bankSize": 16,
+     "bank": {
+      "clean": 13,
+      "muffled": 3
+     },
+     "reasons": {
+      "low-score": 158,
+      "learned": 139,
+      "anchor-drift": 15
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.85,
+       "learned": 11
+      },
+      {
+       "step": 50,
+       "thr": 0.85,
+       "learned": 15
+      },
+      {
+       "step": 75,
+       "thr": 0.85,
+       "learned": 16
+      },
+      {
+       "step": 100,
+       "thr": 0.849,
+       "learned": 16
+      },
+      {
+       "step": 125,
+       "thr": 0.842,
+       "learned": 16
+      },
+      {
+       "step": 150,
+       "thr": 0.847,
+       "learned": 16
+      },
+      {
+       "step": 175,
+       "thr": 0.839,
+       "learned": 16
+      },
+      {
+       "step": 200,
+       "thr": 0.841,
+       "learned": 16
+      },
+      {
+       "step": 225,
+       "thr": 0.845,
+       "learned": 16
+      },
+      {
+       "step": 250,
+       "thr": 0.85,
+       "learned": 16
+      },
+      {
+       "step": 275,
+       "thr": 0.85,
+       "learned": 16
+      },
+      {
+       "step": 300,
+       "thr": 0.848,
+       "learned": 16
+      },
+      {
+       "step": 312,
+       "thr": 0.85,
+       "learned": 16
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.333,
+       "muffled": 0.833,
+       "noisy": 0.5,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.833,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.333,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     }
+    },
+    "40": {
+     "finalThreshold": 0.85,
+     "learnedEvents": 138,
+     "bankSize": 40,
+     "bank": {
+      "clean": 36,
+      "muffled": 4
+     },
+     "reasons": {
+      "low-score": 148,
+      "learned": 138,
+      "anchor-drift": 26
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.85,
+       "learned": 14
+      },
+      {
+       "step": 50,
+       "thr": 0.85,
+       "learned": 22
+      },
+      {
+       "step": 75,
+       "thr": 0.85,
+       "learned": 31
+      },
+      {
+       "step": 100,
+       "thr": 0.85,
+       "learned": 37
+      },
+      {
+       "step": 125,
+       "thr": 0.85,
+       "learned": 39
+      },
+      {
+       "step": 150,
+       "thr": 0.847,
+       "learned": 40
+      },
+      {
+       "step": 175,
+       "thr": 0.85,
+       "learned": 40
+      },
+      {
+       "step": 200,
+       "thr": 0.844,
+       "learned": 40
+      },
+      {
+       "step": 225,
+       "thr": 0.846,
+       "learned": 40
+      },
+      {
+       "step": 250,
+       "thr": 0.846,
+       "learned": 40
+      },
+      {
+       "step": 275,
+       "thr": 0.849,
+       "learned": 40
+      },
+      {
+       "step": 300,
+       "thr": 0.85,
+       "learned": 40
+      },
+      {
+       "step": 312,
+       "thr": 0.85,
+       "learned": 40
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.333,
+       "muffled": 0.833,
+       "noisy": 0.667,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.5,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     }
+    },
+    "64": {
+     "finalThreshold": 0.85,
+     "learnedEvents": 139,
+     "bankSize": 64,
+     "bank": {
+      "clean": 60,
+      "muffled": 4
+     },
+     "reasons": {
+      "low-score": 145,
+      "learned": 139,
+      "anchor-drift": 28
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.85,
+       "learned": 14
+      },
+      {
+       "step": 50,
+       "thr": 0.85,
+       "learned": 25
+      },
+      {
+       "step": 75,
+       "thr": 0.85,
+       "learned": 38
+      },
+      {
+       "step": 100,
+       "thr": 0.85,
+       "learned": 47
+      },
+      {
+       "step": 125,
+       "thr": 0.85,
+       "learned": 52
+      },
+      {
+       "step": 150,
+       "thr": 0.85,
+       "learned": 55
+      },
+      {
+       "step": 175,
+       "thr": 0.85,
+       "learned": 59
+      },
+      {
+       "step": 200,
+       "thr": 0.848,
+       "learned": 62
+      },
+      {
+       "step": 225,
+       "thr": 0.85,
+       "learned": 64
+      },
+      {
+       "step": 250,
+       "thr": 0.846,
+       "learned": 64
+      },
+      {
+       "step": 275,
+       "thr": 0.846,
+       "learned": 64
+      },
+      {
+       "step": 300,
+       "thr": 0.85,
+       "learned": 64
+      },
+      {
+       "step": 312,
+       "thr": 0.85,
+       "learned": 64
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.333,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.5,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     }
+    },
+    "128": {
+     "finalThreshold": 0.85,
+     "learnedEvents": 139,
+     "bankSize": 114,
+     "bank": {
+      "clean": 109,
+      "muffled": 5
+     },
+     "reasons": {
+      "low-score": 145,
+      "learned": 139,
+      "anchor-drift": 28
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.85,
+       "learned": 14
+      },
+      {
+       "step": 50,
+       "thr": 0.85,
+       "learned": 25
+      },
+      {
+       "step": 75,
+       "thr": 0.85,
+       "learned": 41
+      },
+      {
+       "step": 100,
+       "thr": 0.85,
+       "learned": 52
+      },
+      {
+       "step": 125,
+       "thr": 0.85,
+       "learned": 62
+      },
+      {
+       "step": 150,
+       "thr": 0.85,
+       "learned": 71
+      },
+      {
+       "step": 175,
+       "thr": 0.85,
+       "learned": 78
+      },
+      {
+       "step": 200,
+       "thr": 0.85,
+       "learned": 84
+      },
+      {
+       "step": 225,
+       "thr": 0.85,
+       "learned": 92
+      },
+      {
+       "step": 250,
+       "thr": 0.85,
+       "learned": 97
+      },
+      {
+       "step": 275,
+       "thr": 0.85,
+       "learned": 102
+      },
+      {
+       "step": 300,
+       "thr": 0.85,
+       "learned": 112
+      },
+      {
+       "step": 312,
+       "thr": 0.85,
+       "learned": 114
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.667,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.5,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     }
+    },
+    "256": {
+     "finalThreshold": 0.85,
+     "learnedEvents": 139,
+     "bankSize": 138,
+     "bank": {
+      "clean": 133,
+      "muffled": 5
+     },
+     "reasons": {
+      "low-score": 145,
+      "learned": 139,
+      "anchor-drift": 28
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.832,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.85,
+       "learned": 14
+      },
+      {
+       "step": 50,
+       "thr": 0.85,
+       "learned": 25
+      },
+      {
+       "step": 75,
+       "thr": 0.85,
+       "learned": 41
+      },
+      {
+       "step": 100,
+       "thr": 0.85,
+       "learned": 52
+      },
+      {
+       "step": 125,
+       "thr": 0.85,
+       "learned": 62
+      },
+      {
+       "step": 150,
+       "thr": 0.85,
+       "learned": 72
+      },
+      {
+       "step": 175,
+       "thr": 0.85,
+       "learned": 80
+      },
+      {
+       "step": 200,
+       "thr": 0.85,
+       "learned": 89
+      },
+      {
+       "step": 225,
+       "thr": 0.85,
+       "learned": 101
+      },
+      {
+       "step": 250,
+       "thr": 0.85,
+       "learned": 111
+      },
+      {
+       "step": 275,
+       "thr": 0.85,
+       "learned": 120
+      },
+      {
+       "step": 300,
+       "thr": 0.85,
+       "learned": 135
+      },
+      {
+       "step": 312,
+       "thr": 0.85,
+       "learned": 138
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.667,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0,
+       "muffled": 0.5,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Karen": 0,
+       "Moira": 0,
+       "Daniel": 0
+      }
+     }
+    }
+   }
+  },
+  "Karen": {
+   "enrollThreshold": 0.653,
+   "caps": {
+    "0": {
+     "finalThreshold": 0.653,
+     "learnedEvents": 0,
+     "bankSize": 0,
+     "bank": {},
+     "reasons": {
+      "skipped": 312
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 50,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 75,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 100,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 125,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 150,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 175,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 200,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 225,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 250,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 275,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 300,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 312,
+       "thr": 0.653,
+       "learned": 0
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0.333
+      },
+      "impostor": 0.302,
+      "impostorByVoice": {
+       "Samantha": 0.426,
+       "Moira": 0.241,
+       "Daniel": 0.241
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.833,
+       "muffled": 0.833,
+       "noisy": 0.667,
+       "fast": 1,
+       "slow": 0.833,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.222,
+      "impostorByVoice": {
+       "Samantha": 0.278,
+       "Moira": 0.185,
+       "Daniel": 0.204
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.667,
+       "muffled": 0.833,
+       "noisy": 0.5,
+       "fast": 0.833,
+       "slow": 0.833,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.204,
+      "impostorByVoice": {
+       "Samantha": 0.222,
+       "Moira": 0.185,
+       "Daniel": 0.204
+      }
+     }
+    },
+    "16": {
+     "finalThreshold": 0.674,
+     "learnedEvents": 228,
+     "bankSize": 16,
+     "bank": {
+      "clean": 4,
+      "noisy": 9,
+      "phone": 2,
+      "muffled": 1
+     },
+     "reasons": {
+      "learned": 228,
+      "low-score": 53,
+      "anchor-drift": 31
+     },
+     "probeAdmitted": 2,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.715,
+       "learned": 16
+      },
+      {
+       "step": 50,
+       "thr": 0.696,
+       "learned": 16
+      },
+      {
+       "step": 75,
+       "thr": 0.694,
+       "learned": 16
+      },
+      {
+       "step": 100,
+       "thr": 0.688,
+       "learned": 16
+      },
+      {
+       "step": 125,
+       "thr": 0.675,
+       "learned": 16
+      },
+      {
+       "step": 150,
+       "thr": 0.672,
+       "learned": 16
+      },
+      {
+       "step": 175,
+       "thr": 0.675,
+       "learned": 16
+      },
+      {
+       "step": 200,
+       "thr": 0.684,
+       "learned": 16
+      },
+      {
+       "step": 225,
+       "thr": 0.666,
+       "learned": 16
+      },
+      {
+       "step": 250,
+       "thr": 0.667,
+       "learned": 16
+      },
+      {
+       "step": 275,
+       "thr": 0.668,
+       "learned": 16
+      },
+      {
+       "step": 300,
+       "thr": 0.666,
+       "learned": 16
+      },
+      {
+       "step": 312,
+       "thr": 0.674,
+       "learned": 16
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 1
+      },
+      "impostor": 0.426,
+      "impostorByVoice": {
+       "Samantha": 0.63,
+       "Moira": 0.333,
+       "Daniel": 0.315
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0.833
+      },
+      "impostor": 0.346,
+      "impostorByVoice": {
+       "Samantha": 0.463,
+       "Moira": 0.259,
+       "Daniel": 0.315
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0.333
+      },
+      "impostor": 0.278,
+      "impostorByVoice": {
+       "Samantha": 0.333,
+       "Moira": 0.241,
+       "Daniel": 0.259
+      }
+     }
+    },
+    "40": {
+     "finalThreshold": 0.682,
+     "learnedEvents": 226,
+     "bankSize": 40,
+     "bank": {
+      "clean": 13,
+      "noisy": 17,
+      "phone": 7,
+      "muffled": 2,
+      "fast": 1
+     },
+     "reasons": {
+      "learned": 226,
+      "low-score": 52,
+      "anchor-drift": 34
+     },
+     "probeAdmitted": 2,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.715,
+       "learned": 16
+      },
+      {
+       "step": 50,
+       "thr": 0.708,
+       "learned": 32
+      },
+      {
+       "step": 75,
+       "thr": 0.705,
+       "learned": 40
+      },
+      {
+       "step": 100,
+       "thr": 0.697,
+       "learned": 40
+      },
+      {
+       "step": 125,
+       "thr": 0.698,
+       "learned": 40
+      },
+      {
+       "step": 150,
+       "thr": 0.699,
+       "learned": 40
+      },
+      {
+       "step": 175,
+       "thr": 0.692,
+       "learned": 40
+      },
+      {
+       "step": 200,
+       "thr": 0.689,
+       "learned": 40
+      },
+      {
+       "step": 225,
+       "thr": 0.686,
+       "learned": 40
+      },
+      {
+       "step": 250,
+       "thr": 0.68,
+       "learned": 40
+      },
+      {
+       "step": 275,
+       "thr": 0.679,
+       "learned": 40
+      },
+      {
+       "step": 300,
+       "thr": 0.683,
+       "learned": 40
+      },
+      {
+       "step": 312,
+       "thr": 0.682,
+       "learned": 40
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 1
+      },
+      "impostor": 0.463,
+      "impostorByVoice": {
+       "Samantha": 0.704,
+       "Moira": 0.352,
+       "Daniel": 0.333
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0.833
+      },
+      "impostor": 0.377,
+      "impostorByVoice": {
+       "Samantha": 0.5,
+       "Moira": 0.315,
+       "Daniel": 0.315
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0.333
+      },
+      "impostor": 0.302,
+      "impostorByVoice": {
+       "Samantha": 0.37,
+       "Moira": 0.259,
+       "Daniel": 0.278
+      }
+     }
+    },
+    "64": {
+     "finalThreshold": 0.689,
+     "learnedEvents": 222,
+     "bankSize": 64,
+     "bank": {
+      "clean": 24,
+      "noisy": 23,
+      "phone": 8,
+      "muffled": 8,
+      "fast": 1
+     },
+     "reasons": {
+      "learned": 222,
+      "low-score": 51,
+      "anchor-drift": 39
+     },
+     "probeAdmitted": 2,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.715,
+       "learned": 16
+      },
+      {
+       "step": 50,
+       "thr": 0.708,
+       "learned": 32
+      },
+      {
+       "step": 75,
+       "thr": 0.709,
+       "learned": 50
+      },
+      {
+       "step": 100,
+       "thr": 0.707,
+       "learned": 64
+      },
+      {
+       "step": 125,
+       "thr": 0.7,
+       "learned": 64
+      },
+      {
+       "step": 150,
+       "thr": 0.694,
+       "learned": 64
+      },
+      {
+       "step": 175,
+       "thr": 0.692,
+       "learned": 64
+      },
+      {
+       "step": 200,
+       "thr": 0.695,
+       "learned": 64
+      },
+      {
+       "step": 225,
+       "thr": 0.689,
+       "learned": 64
+      },
+      {
+       "step": 250,
+       "thr": 0.688,
+       "learned": 64
+      },
+      {
+       "step": 275,
+       "thr": 0.689,
+       "learned": 64
+      },
+      {
+       "step": 300,
+       "thr": 0.69,
+       "learned": 64
+      },
+      {
+       "step": 312,
+       "thr": 0.689,
+       "learned": 64
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 1,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 1
+      },
+      "impostor": 0.475,
+      "impostorByVoice": {
+       "Samantha": 0.704,
+       "Moira": 0.389,
+       "Daniel": 0.333
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0.833
+      },
+      "impostor": 0.395,
+      "impostorByVoice": {
+       "Samantha": 0.556,
+       "Moira": 0.315,
+       "Daniel": 0.315
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0.833
+      },
+      "impostor": 0.321,
+      "impostorByVoice": {
+       "Samantha": 0.389,
+       "Moira": 0.278,
+       "Daniel": 0.296
+      }
+     }
+    },
+    "128": {
+     "finalThreshold": 0.699,
+     "learnedEvents": 219,
+     "bankSize": 128,
+     "bank": {
+      "clean": 74,
+      "fast": 4,
+      "noisy": 23,
+      "phone": 11,
+      "muffled": 13,
+      "slow": 3
+     },
+     "reasons": {
+      "learned": 219,
+      "low-score": 50,
+      "anchor-drift": 43
+     },
+     "probeAdmitted": 2,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.715,
+       "learned": 16
+      },
+      {
+       "step": 50,
+       "thr": 0.708,
+       "learned": 32
+      },
+      {
+       "step": 75,
+       "thr": 0.709,
+       "learned": 50
+      },
+      {
+       "step": 100,
+       "thr": 0.71,
+       "learned": 68
+      },
+      {
+       "step": 125,
+       "thr": 0.707,
+       "learned": 85
+      },
+      {
+       "step": 150,
+       "thr": 0.706,
+       "learned": 104
+      },
+      {
+       "step": 175,
+       "thr": 0.701,
+       "learned": 124
+      },
+      {
+       "step": 200,
+       "thr": 0.701,
+       "learned": 128
+      },
+      {
+       "step": 225,
+       "thr": 0.698,
+       "learned": 128
+      },
+      {
+       "step": 250,
+       "thr": 0.698,
+       "learned": 128
+      },
+      {
+       "step": 275,
+       "thr": 0.697,
+       "learned": 128
+      },
+      {
+       "step": 300,
+       "thr": 0.7,
+       "learned": 128
+      },
+      {
+       "step": 312,
+       "thr": 0.699,
+       "learned": 128
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 1
+      },
+      "impostor": 0.488,
+      "impostorByVoice": {
+       "Samantha": 0.685,
+       "Moira": 0.407,
+       "Daniel": 0.37
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 1,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 1
+      },
+      "impostor": 0.432,
+      "impostorByVoice": {
+       "Samantha": 0.593,
+       "Moira": 0.37,
+       "Daniel": 0.333
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0.833
+      },
+      "impostor": 0.34,
+      "impostorByVoice": {
+       "Samantha": 0.407,
+       "Moira": 0.296,
+       "Daniel": 0.315
+      }
+     }
+    },
+    "256": {
+     "finalThreshold": 0.7,
+     "learnedEvents": 221,
+     "bankSize": 221,
+     "bank": {
+      "clean": 162,
+      "fast": 6,
+      "noisy": 23,
+      "phone": 11,
+      "muffled": 15,
+      "slow": 4
+     },
+     "reasons": {
+      "learned": 221,
+      "low-score": 49,
+      "anchor-drift": 42
+     },
+     "probeAdmitted": 2,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.653,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.715,
+       "learned": 16
+      },
+      {
+       "step": 50,
+       "thr": 0.708,
+       "learned": 32
+      },
+      {
+       "step": 75,
+       "thr": 0.709,
+       "learned": 50
+      },
+      {
+       "step": 100,
+       "thr": 0.71,
+       "learned": 68
+      },
+      {
+       "step": 125,
+       "thr": 0.707,
+       "learned": 85
+      },
+      {
+       "step": 150,
+       "thr": 0.706,
+       "learned": 104
+      },
+      {
+       "step": 175,
+       "thr": 0.701,
+       "learned": 124
+      },
+      {
+       "step": 200,
+       "thr": 0.703,
+       "learned": 142
+      },
+      {
+       "step": 225,
+       "thr": 0.7,
+       "learned": 158
+      },
+      {
+       "step": 250,
+       "thr": 0.698,
+       "learned": 177
+      },
+      {
+       "step": 275,
+       "thr": 0.697,
+       "learned": 195
+      },
+      {
+       "step": 300,
+       "thr": 0.698,
+       "learned": 213
+      },
+      {
+       "step": 312,
+       "thr": 0.7,
+       "learned": 221
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 1
+      },
+      "impostor": 0.5,
+      "impostorByVoice": {
+       "Samantha": 0.722,
+       "Moira": 0.407,
+       "Daniel": 0.37
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 1,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 1
+      },
+      "impostor": 0.444,
+      "impostorByVoice": {
+       "Samantha": 0.611,
+       "Moira": 0.389,
+       "Daniel": 0.333
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 0.833,
+       "noisy": 0.833,
+       "fast": 1,
+       "slow": 1,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0.833
+      },
+      "impostor": 0.352,
+      "impostorByVoice": {
+       "Samantha": 0.444,
+       "Moira": 0.296,
+       "Daniel": 0.315
+      }
+     }
+    }
+   }
+  },
+  "Moira": {
+   "enrollThreshold": 0.61,
+   "caps": {
+    "0": {
+     "finalThreshold": 0.61,
+     "learnedEvents": 0,
+     "bankSize": 0,
+     "bank": {},
+     "reasons": {
+      "skipped": 312
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 50,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 75,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 100,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 125,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 150,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 175,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 200,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 225,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 250,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 275,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 300,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 312,
+       "thr": 0.61,
+       "learned": 0
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.833,
+       "muffled": 1,
+       "noisy": 0.833,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0.167,
+       "combo": 0.167
+      },
+      "impostor": 0.074,
+      "impostorByVoice": {
+       "Samantha": 0.056,
+       "Karen": 0.074,
+       "Daniel": 0.093
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.667,
+       "muffled": 0.833,
+       "noisy": 0.667,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.043,
+      "impostorByVoice": {
+       "Samantha": 0.056,
+       "Karen": 0.037,
+       "Daniel": 0.037
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.025,
+      "impostorByVoice": {
+       "Samantha": 0.037,
+       "Karen": 0.019,
+       "Daniel": 0.019
+      }
+     }
+    },
+    "16": {
+     "finalThreshold": 0.838,
+     "learnedEvents": 27,
+     "bankSize": 16,
+     "bank": {
+      "clean": 15,
+      "phone": 1
+     },
+     "reasons": {
+      "learned": 27,
+      "low-score": 175,
+      "anchor-drift": 110
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.75,
+       "learned": 9
+      },
+      {
+       "step": 50,
+       "thr": 0.81,
+       "learned": 12
+      },
+      {
+       "step": 75,
+       "thr": 0.821,
+       "learned": 12
+      },
+      {
+       "step": 100,
+       "thr": 0.821,
+       "learned": 12
+      },
+      {
+       "step": 125,
+       "thr": 0.84,
+       "learned": 13
+      },
+      {
+       "step": 150,
+       "thr": 0.84,
+       "learned": 15
+      },
+      {
+       "step": 175,
+       "thr": 0.843,
+       "learned": 15
+      },
+      {
+       "step": 200,
+       "thr": 0.843,
+       "learned": 16
+      },
+      {
+       "step": 225,
+       "thr": 0.842,
+       "learned": 16
+      },
+      {
+       "step": 250,
+       "thr": 0.842,
+       "learned": 16
+      },
+      {
+       "step": 275,
+       "thr": 0.842,
+       "learned": 16
+      },
+      {
+       "step": 300,
+       "thr": 0.838,
+       "learned": 16
+      },
+      {
+       "step": 312,
+       "thr": 0.838,
+       "learned": 16
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.037,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.037,
+       "Daniel": 0.056
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.019,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.019,
+       "Daniel": 0.019
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.167,
+       "muffled": 0.667,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Samantha": 0,
+       "Karen": 0,
+       "Daniel": 0
+      }
+     }
+    },
+    "40": {
+     "finalThreshold": 0.846,
+     "learnedEvents": 27,
+     "bankSize": 25,
+     "bank": {
+      "clean": 24,
+      "phone": 1
+     },
+     "reasons": {
+      "learned": 27,
+      "low-score": 177,
+      "anchor-drift": 108
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.75,
+       "learned": 9
+      },
+      {
+       "step": 50,
+       "thr": 0.81,
+       "learned": 12
+      },
+      {
+       "step": 75,
+       "thr": 0.831,
+       "learned": 14
+      },
+      {
+       "step": 100,
+       "thr": 0.831,
+       "learned": 14
+      },
+      {
+       "step": 125,
+       "thr": 0.84,
+       "learned": 15
+      },
+      {
+       "step": 150,
+       "thr": 0.84,
+       "learned": 17
+      },
+      {
+       "step": 175,
+       "thr": 0.843,
+       "learned": 18
+      },
+      {
+       "step": 200,
+       "thr": 0.843,
+       "learned": 21
+      },
+      {
+       "step": 225,
+       "thr": 0.846,
+       "learned": 23
+      },
+      {
+       "step": 250,
+       "thr": 0.846,
+       "learned": 24
+      },
+      {
+       "step": 275,
+       "thr": 0.846,
+       "learned": 24
+      },
+      {
+       "step": 300,
+       "thr": 0.846,
+       "learned": 25
+      },
+      {
+       "step": 312,
+       "thr": 0.846,
+       "learned": 25
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.037,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.037,
+       "Daniel": 0.056
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.019,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.019,
+       "Daniel": 0.019
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.167,
+       "muffled": 0.333,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Samantha": 0,
+       "Karen": 0,
+       "Daniel": 0
+      }
+     }
+    },
+    "64": {
+     "finalThreshold": 0.846,
+     "learnedEvents": 27,
+     "bankSize": 27,
+     "bank": {
+      "clean": 26,
+      "phone": 1
+     },
+     "reasons": {
+      "learned": 27,
+      "low-score": 177,
+      "anchor-drift": 108
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.75,
+       "learned": 9
+      },
+      {
+       "step": 50,
+       "thr": 0.81,
+       "learned": 12
+      },
+      {
+       "step": 75,
+       "thr": 0.831,
+       "learned": 14
+      },
+      {
+       "step": 100,
+       "thr": 0.831,
+       "learned": 14
+      },
+      {
+       "step": 125,
+       "thr": 0.84,
+       "learned": 15
+      },
+      {
+       "step": 150,
+       "thr": 0.84,
+       "learned": 17
+      },
+      {
+       "step": 175,
+       "thr": 0.843,
+       "learned": 18
+      },
+      {
+       "step": 200,
+       "thr": 0.843,
+       "learned": 21
+      },
+      {
+       "step": 225,
+       "thr": 0.846,
+       "learned": 25
+      },
+      {
+       "step": 250,
+       "thr": 0.846,
+       "learned": 26
+      },
+      {
+       "step": 275,
+       "thr": 0.846,
+       "learned": 26
+      },
+      {
+       "step": 300,
+       "thr": 0.846,
+       "learned": 27
+      },
+      {
+       "step": 312,
+       "thr": 0.846,
+       "learned": 27
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.037,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.037,
+       "Daniel": 0.056
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.019,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.019,
+       "Daniel": 0.019
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.167,
+       "muffled": 0.333,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Samantha": 0,
+       "Karen": 0,
+       "Daniel": 0
+      }
+     }
+    },
+    "128": {
+     "finalThreshold": 0.846,
+     "learnedEvents": 27,
+     "bankSize": 27,
+     "bank": {
+      "clean": 26,
+      "phone": 1
+     },
+     "reasons": {
+      "learned": 27,
+      "low-score": 177,
+      "anchor-drift": 108
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.75,
+       "learned": 9
+      },
+      {
+       "step": 50,
+       "thr": 0.81,
+       "learned": 12
+      },
+      {
+       "step": 75,
+       "thr": 0.831,
+       "learned": 14
+      },
+      {
+       "step": 100,
+       "thr": 0.831,
+       "learned": 14
+      },
+      {
+       "step": 125,
+       "thr": 0.84,
+       "learned": 15
+      },
+      {
+       "step": 150,
+       "thr": 0.84,
+       "learned": 17
+      },
+      {
+       "step": 175,
+       "thr": 0.843,
+       "learned": 18
+      },
+      {
+       "step": 200,
+       "thr": 0.843,
+       "learned": 21
+      },
+      {
+       "step": 225,
+       "thr": 0.846,
+       "learned": 25
+      },
+      {
+       "step": 250,
+       "thr": 0.846,
+       "learned": 26
+      },
+      {
+       "step": 275,
+       "thr": 0.846,
+       "learned": 26
+      },
+      {
+       "step": 300,
+       "thr": 0.846,
+       "learned": 27
+      },
+      {
+       "step": 312,
+       "thr": 0.846,
+       "learned": 27
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.037,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.037,
+       "Daniel": 0.056
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.019,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.019,
+       "Daniel": 0.019
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.167,
+       "muffled": 0.333,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Samantha": 0,
+       "Karen": 0,
+       "Daniel": 0
+      }
+     }
+    },
+    "256": {
+     "finalThreshold": 0.846,
+     "learnedEvents": 27,
+     "bankSize": 27,
+     "bank": {
+      "clean": 26,
+      "phone": 1
+     },
+     "reasons": {
+      "learned": 27,
+      "low-score": 177,
+      "anchor-drift": 108
+     },
+     "probeAdmitted": 0,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.61,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.75,
+       "learned": 9
+      },
+      {
+       "step": 50,
+       "thr": 0.81,
+       "learned": 12
+      },
+      {
+       "step": 75,
+       "thr": 0.831,
+       "learned": 14
+      },
+      {
+       "step": 100,
+       "thr": 0.831,
+       "learned": 14
+      },
+      {
+       "step": 125,
+       "thr": 0.84,
+       "learned": 15
+      },
+      {
+       "step": 150,
+       "thr": 0.84,
+       "learned": 17
+      },
+      {
+       "step": 175,
+       "thr": 0.843,
+       "learned": 18
+      },
+      {
+       "step": 200,
+       "thr": 0.843,
+       "learned": 21
+      },
+      {
+       "step": 225,
+       "thr": 0.846,
+       "learned": 25
+      },
+      {
+       "step": 250,
+       "thr": 0.846,
+       "learned": 26
+      },
+      {
+       "step": 275,
+       "thr": 0.846,
+       "learned": 26
+      },
+      {
+       "step": 300,
+       "thr": 0.846,
+       "learned": 27
+      },
+      {
+       "step": 312,
+       "thr": 0.846,
+       "learned": 27
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0.167,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.037,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.037,
+       "Daniel": 0.056
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.5,
+       "muffled": 0.833,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.019,
+      "impostorByVoice": {
+       "Samantha": 0.019,
+       "Karen": 0.019,
+       "Daniel": 0.019
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 0.167,
+       "muffled": 0.333,
+       "noisy": 0,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0,
+      "impostorByVoice": {
+       "Samantha": 0,
+       "Karen": 0,
+       "Daniel": 0
+      }
+     }
+    }
+   }
+  },
+  "Daniel": {
+   "enrollThreshold": 0.5,
+   "caps": {
+    "0": {
+     "finalThreshold": 0.5,
+     "learnedEvents": 0,
+     "bankSize": 0,
+     "bank": {},
+     "reasons": {
+      "skipped": 312
+     },
+     "probeAdmitted": 5,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 50,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 75,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 100,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 125,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 150,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 175,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 200,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 225,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 250,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 275,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 300,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 312,
+       "thr": 0.5,
+       "learned": 0
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.5,
+       "pitchdown": 0,
+       "combo": 0.167
+      },
+      "impostor": 0.117,
+      "impostorByVoice": {
+       "Samantha": 0.074,
+       "Karen": 0.074,
+       "Moira": 0.204
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.5,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.074,
+      "impostorByVoice": {
+       "Samantha": 0.037,
+       "Karen": 0.056,
+       "Moira": 0.13
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0,
+       "pitchdown": 0,
+       "combo": 0
+      },
+      "impostor": 0.025,
+      "impostorByVoice": {
+       "Samantha": 0,
+       "Karen": 0.019,
+       "Moira": 0.056
+      }
+     }
+    },
+    "16": {
+     "finalThreshold": 0.626,
+     "learnedEvents": 197,
+     "bankSize": 16,
+     "bank": {
+      "noisy": 5,
+      "clean": 3,
+      "phone": 3,
+      "muffled": 5
+     },
+     "reasons": {
+      "learned": 197,
+      "low-score": 40,
+      "anchor-drift": 75
+     },
+     "probeAdmitted": 7,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.699,
+       "learned": 16
+      },
+      {
+       "step": 50,
+       "thr": 0.64,
+       "learned": 16
+      },
+      {
+       "step": 75,
+       "thr": 0.697,
+       "learned": 16
+      },
+      {
+       "step": 100,
+       "thr": 0.718,
+       "learned": 16
+      },
+      {
+       "step": 125,
+       "thr": 0.718,
+       "learned": 16
+      },
+      {
+       "step": 150,
+       "thr": 0.696,
+       "learned": 16
+      },
+      {
+       "step": 175,
+       "thr": 0.69,
+       "learned": 16
+      },
+      {
+       "step": 200,
+       "thr": 0.691,
+       "learned": 16
+      },
+      {
+       "step": 225,
+       "thr": 0.679,
+       "learned": 16
+      },
+      {
+       "step": 250,
+       "thr": 0.678,
+       "learned": 16
+      },
+      {
+       "step": 275,
+       "thr": 0.656,
+       "learned": 16
+      },
+      {
+       "step": 300,
+       "thr": 0.633,
+       "learned": 16
+      },
+      {
+       "step": 312,
+       "thr": 0.626,
+       "learned": 16
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0.167,
+       "slow": 0.167,
+       "pitchup": 0.5,
+       "pitchdown": 0.5,
+       "combo": 0.5
+      },
+      "impostor": 0.198,
+      "impostorByVoice": {
+       "Samantha": 0.074,
+       "Karen": 0.148,
+       "Moira": 0.37
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.5,
+       "pitchdown": 0.333,
+       "combo": 0.167
+      },
+      "impostor": 0.136,
+      "impostorByVoice": {
+       "Samantha": 0.074,
+       "Karen": 0.093,
+       "Moira": 0.241
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.333,
+       "pitchdown": 0,
+       "combo": 0.167
+      },
+      "impostor": 0.111,
+      "impostorByVoice": {
+       "Samantha": 0.056,
+       "Karen": 0.074,
+       "Moira": 0.204
+      }
+     }
+    },
+    "40": {
+     "finalThreshold": 0.649,
+     "learnedEvents": 193,
+     "bankSize": 40,
+     "bank": {
+      "clean": 16,
+      "noisy": 6,
+      "muffled": 10,
+      "phone": 8
+     },
+     "reasons": {
+      "learned": 193,
+      "low-score": 37,
+      "anchor-drift": 82
+     },
+     "probeAdmitted": 7,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.699,
+       "learned": 20
+      },
+      {
+       "step": 50,
+       "thr": 0.678,
+       "learned": 35
+      },
+      {
+       "step": 75,
+       "thr": 0.699,
+       "learned": 40
+      },
+      {
+       "step": 100,
+       "thr": 0.699,
+       "learned": 40
+      },
+      {
+       "step": 125,
+       "thr": 0.699,
+       "learned": 40
+      },
+      {
+       "step": 150,
+       "thr": 0.699,
+       "learned": 40
+      },
+      {
+       "step": 175,
+       "thr": 0.699,
+       "learned": 40
+      },
+      {
+       "step": 200,
+       "thr": 0.699,
+       "learned": 40
+      },
+      {
+       "step": 225,
+       "thr": 0.679,
+       "learned": 40
+      },
+      {
+       "step": 250,
+       "thr": 0.647,
+       "learned": 40
+      },
+      {
+       "step": 275,
+       "thr": 0.647,
+       "learned": 40
+      },
+      {
+       "step": 300,
+       "thr": 0.649,
+       "learned": 40
+      },
+      {
+       "step": 312,
+       "thr": 0.649,
+       "learned": 40
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0.5,
+       "slow": 0.167,
+       "pitchup": 0.5,
+       "pitchdown": 0.5,
+       "combo": 0.333
+      },
+      "impostor": 0.235,
+      "impostorByVoice": {
+       "Samantha": 0.111,
+       "Karen": 0.167,
+       "Moira": 0.426
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0.167,
+       "pitchup": 0.5,
+       "pitchdown": 0.5,
+       "combo": 0.167
+      },
+      "impostor": 0.148,
+      "impostorByVoice": {
+       "Samantha": 0.056,
+       "Karen": 0.111,
+       "Moira": 0.278
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.5,
+       "pitchdown": 0.167,
+       "combo": 0.167
+      },
+      "impostor": 0.117,
+      "impostorByVoice": {
+       "Samantha": 0.056,
+       "Karen": 0.074,
+       "Moira": 0.222
+      }
+     }
+    },
+    "64": {
+     "finalThreshold": 0.699,
+     "learnedEvents": 185,
+     "bankSize": 64,
+     "bank": {
+      "phone": 11,
+      "clean": 33,
+      "noisy": 8,
+      "muffled": 12
+     },
+     "reasons": {
+      "learned": 185,
+      "low-score": 37,
+      "anchor-drift": 90
+     },
+     "probeAdmitted": 7,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.699,
+       "learned": 20
+      },
+      {
+       "step": 50,
+       "thr": 0.678,
+       "learned": 35
+      },
+      {
+       "step": 75,
+       "thr": 0.706,
+       "learned": 53
+      },
+      {
+       "step": 100,
+       "thr": 0.706,
+       "learned": 64
+      },
+      {
+       "step": 125,
+       "thr": 0.706,
+       "learned": 64
+      },
+      {
+       "step": 150,
+       "thr": 0.699,
+       "learned": 64
+      },
+      {
+       "step": 175,
+       "thr": 0.699,
+       "learned": 64
+      },
+      {
+       "step": 200,
+       "thr": 0.699,
+       "learned": 64
+      },
+      {
+       "step": 225,
+       "thr": 0.699,
+       "learned": 64
+      },
+      {
+       "step": 250,
+       "thr": 0.699,
+       "learned": 64
+      },
+      {
+       "step": 275,
+       "thr": 0.699,
+       "learned": 64
+      },
+      {
+       "step": 300,
+       "thr": 0.699,
+       "learned": 64
+      },
+      {
+       "step": 312,
+       "thr": 0.699,
+       "learned": 64
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0.333,
+       "slow": 0.167,
+       "pitchup": 0.5,
+       "pitchdown": 0.5,
+       "combo": 0.333
+      },
+      "impostor": 0.185,
+      "impostorByVoice": {
+       "Samantha": 0.074,
+       "Karen": 0.148,
+       "Moira": 0.333
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.5,
+       "pitchdown": 0.5,
+       "combo": 0.167
+      },
+      "impostor": 0.136,
+      "impostorByVoice": {
+       "Samantha": 0.056,
+       "Karen": 0.093,
+       "Moira": 0.259
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.333,
+       "pitchdown": 0.167,
+       "combo": 0.167
+      },
+      "impostor": 0.105,
+      "impostorByVoice": {
+       "Samantha": 0.056,
+       "Karen": 0.074,
+       "Moira": 0.185
+      }
+     }
+    },
+    "128": {
+     "finalThreshold": 0.706,
+     "learnedEvents": 183,
+     "bankSize": 128,
+     "bank": {
+      "phone": 15,
+      "clean": 91,
+      "noisy": 10,
+      "muffled": 12
+     },
+     "reasons": {
+      "learned": 183,
+      "low-score": 37,
+      "anchor-drift": 92
+     },
+     "probeAdmitted": 7,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.699,
+       "learned": 20
+      },
+      {
+       "step": 50,
+       "thr": 0.678,
+       "learned": 35
+      },
+      {
+       "step": 75,
+       "thr": 0.706,
+       "learned": 53
+      },
+      {
+       "step": 100,
+       "thr": 0.706,
+       "learned": 67
+      },
+      {
+       "step": 125,
+       "thr": 0.706,
+       "learned": 79
+      },
+      {
+       "step": 150,
+       "thr": 0.706,
+       "learned": 88
+      },
+      {
+       "step": 175,
+       "thr": 0.706,
+       "learned": 98
+      },
+      {
+       "step": 200,
+       "thr": 0.706,
+       "learned": 110
+      },
+      {
+       "step": 225,
+       "thr": 0.706,
+       "learned": 122
+      },
+      {
+       "step": 250,
+       "thr": 0.706,
+       "learned": 128
+      },
+      {
+       "step": 275,
+       "thr": 0.706,
+       "learned": 128
+      },
+      {
+       "step": 300,
+       "thr": 0.706,
+       "learned": 128
+      },
+      {
+       "step": 312,
+       "thr": 0.706,
+       "learned": 128
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0.167,
+       "pitchup": 0.5,
+       "pitchdown": 0.5,
+       "combo": 0.333
+      },
+      "impostor": 0.191,
+      "impostorByVoice": {
+       "Samantha": 0.074,
+       "Karen": 0.148,
+       "Moira": 0.352
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.5,
+       "pitchdown": 0.333,
+       "combo": 0.167
+      },
+      "impostor": 0.136,
+      "impostorByVoice": {
+       "Samantha": 0.074,
+       "Karen": 0.093,
+       "Moira": 0.241
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.333,
+       "pitchdown": 0,
+       "combo": 0.167
+      },
+      "impostor": 0.111,
+      "impostorByVoice": {
+       "Samantha": 0.056,
+       "Karen": 0.074,
+       "Moira": 0.204
+      }
+     }
+    },
+    "256": {
+     "finalThreshold": 0.706,
+     "learnedEvents": 183,
+     "bankSize": 183,
+     "bank": {
+      "clean": 145,
+      "phone": 16,
+      "noisy": 10,
+      "muffled": 12
+     },
+     "reasons": {
+      "learned": 183,
+      "low-score": 37,
+      "anchor-drift": 92
+     },
+     "probeAdmitted": 7,
+     "probeLearned": 0,
+     "traj": [
+      {
+       "step": 0,
+       "thr": 0.5,
+       "learned": 0
+      },
+      {
+       "step": 25,
+       "thr": 0.699,
+       "learned": 20
+      },
+      {
+       "step": 50,
+       "thr": 0.678,
+       "learned": 35
+      },
+      {
+       "step": 75,
+       "thr": 0.706,
+       "learned": 53
+      },
+      {
+       "step": 100,
+       "thr": 0.706,
+       "learned": 67
+      },
+      {
+       "step": 125,
+       "thr": 0.706,
+       "learned": 79
+      },
+      {
+       "step": 150,
+       "thr": 0.706,
+       "learned": 89
+      },
+      {
+       "step": 175,
+       "thr": 0.706,
+       "learned": 101
+      },
+      {
+       "step": 200,
+       "thr": 0.706,
+       "learned": 114
+      },
+      {
+       "step": 225,
+       "thr": 0.706,
+       "learned": 130
+      },
+      {
+       "step": 250,
+       "thr": 0.706,
+       "learned": 145
+      },
+      {
+       "step": 275,
+       "thr": 0.706,
+       "learned": 159
+      },
+      {
+       "step": 300,
+       "thr": 0.706,
+       "learned": 178
+      },
+      {
+       "step": 312,
+       "thr": 0.706,
+       "learned": 183
+      }
+     ],
+     "atMinus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0.167,
+       "pitchup": 0.5,
+       "pitchdown": 0.5,
+       "combo": 0.333
+      },
+      "impostor": 0.191,
+      "impostorByVoice": {
+       "Samantha": 0.074,
+       "Karen": 0.148,
+       "Moira": 0.352
+      }
+     },
+     "atThr": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.5,
+       "pitchdown": 0.333,
+       "combo": 0.167
+      },
+      "impostor": 0.136,
+      "impostorByVoice": {
+       "Samantha": 0.074,
+       "Karen": 0.093,
+       "Moira": 0.241
+      }
+     },
+     "atPlus": {
+      "owner": {
+       "clean": 1,
+       "phone": 1,
+       "muffled": 1,
+       "noisy": 1,
+       "fast": 0,
+       "slow": 0,
+       "pitchup": 0.333,
+       "pitchdown": 0,
+       "combo": 0.167
+      },
+      "impostor": 0.111,
+      "impostorByVoice": {
+       "Samantha": 0.056,
+       "Karen": 0.074,
+       "Moira": 0.204
+      }
+     }
+    }
+   }
+  }
+ }
+}
