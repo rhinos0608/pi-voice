@@ -1,10 +1,10 @@
 # Speaker capture-path diagnostic
 
-Compares four microphone capture paths on the SAME 4 spoken phrases to find
+Compares six microphone capture paths on the SAME 4 spoken phrases to find
 out whether the owner's unstable CAM++ embeddings come from the audio fed to
 the embedder (suspected) rather than from the accept threshold. Phrases are
 the first 4 enrollment phrases from `src/commands.ts` (longer sentences,
->= 3 s of speech each).
+~5 s of speech each).
 
 - **A — helper VP on, AGC off**: production default
   (`createVoiceIo({ voiceProcessing: true })`, 16 kHz mono s16le on stdout).
@@ -15,20 +15,34 @@ the first 4 enrollment phrases from `src/commands.ts` (longer sentences,
 - **D — ffmpeg raw**: AVFoundation capture with the exact arguments from
   `createAvFoundationSource` in `src/mic.ts` (`-i :default -ac 1 -ar 16000
   -f s16le`), i.e. the pre-helper capture path.
+- **E — ffmpeg raw WHILE helper VP-on running**: the planned production
+  setup for speaker verification — the helper is started first with VP on
+  (as during wake/STT) and kept running with its PCM discarded while
+  ffmpeg captures concurrently.
+- **F — ffmpeg raw WHILE bypass helper running**: control for E. A
+  concurrency probe showed VP-on helper activity attenuates a concurrent
+  raw ffmpeg capture of the same mic by 15–26 dB with gating (exact-zero
+  fraction 0.6% → 11–20%), i.e. VP affects the shared device feed
+  system-wide. F holds the device with VP DSP bypassed to isolate whether
+  that attenuation comes from VP DSP or merely from holding the device.
+  The helper has no runtime bypass toggle (stdin protocol is
+  PLAY/FINISH/STOP/QUIT only), so the helper is restarted with `--bypass
+  on` for the recording and stopped at record end; the restart latency is
+  printed per recording.
 
 ## How to run
 
 From the repo root (`/Users/rhinesharar/pi-voice`):
 
 ```sh
-node research/speaker-diag/diag.mjs               # interactive, needs the owner + mic (paths A,C,D)
-node research/speaker-diag/diag.mjs --paths A,C,D  # same; pick any subset of A,B,C,D
+node research/speaker-diag/diag.mjs               # interactive, needs the owner + mic (paths E,F,D)
+node research/speaker-diag/diag.mjs --paths E,F,D  # same; pick any subset of A,B,C,D,E,F
 node research/speaker-diag/diag.mjs --self-test    # no human, no microphone
 node research/speaker-diag/diag.mjs --help
 ```
 
 Interactive flow: for each selected path in turn, each of the 4 printed
-phrases is recorded (~3–4 s; owner presses Enter to start, recording stops on
+phrases is recorded (~5 s; owner presses Enter to start, recording stops on
 VAD end-of-speech or after 6 s). Audio stays in memory; nothing is written to
 disk. Do NOT run the interactive mode unattended — it needs the owner
 speaking into the microphone.
@@ -43,9 +57,11 @@ metrics/embedding pipeline. Exit 0 + `SELF-TEST PASS` means the tool works.
 Per clip:
 
 - `bytes (Xs @16k) vs wall Ys (Z%)` — sample-rate sanity. Bytes received
-  should equal wall-clock time at 16 kHz mono s16le (32000 B/s). A ratio far
-  from 100% (flagged `SAMPLE-RATE MISMATCH?` beyond ±5%) means the capture
-  path is delivering the wrong rate — e.g. the earlier 3 s VP capture that
+  should equal wall-clock time at 16 kHz mono s16le (32000 B/s). Wall
+  clock runs from the first received byte to stop (not from Enter, so
+  ffmpeg/helper startup delay can't trip it), and `SAMPLE-RATE MISMATCH?`
+  is flagged below 95% or above 105% — a ratio far from 100% means the capture
+  path is delivering the wrong rate, e.g. the earlier 3 s VP capture that
   produced only 66,858 bytes instead of ~96,000.
 - `rms` (dBFS) — loudness. Healthy speech is roughly **−25 to −10 dBFS**.
   The suspect VP-on capture sat at about −58 dBFS (near silence) — that alone
@@ -60,6 +76,8 @@ Per clip:
   appears only if the VAD model file is missing.
 - `score` — `scoreSample` of the full-clip embedding against the saved owner
   profile (`loadSpeakerProfile`); `n/a` when no profile is enrolled.
+- `score-2.5s` / `score-4s` — same, but over the first 2.5 s / 4 s of
+  speech, matching the gate's decision points.
 
 Embedding views (each printed as a 4×4 cosine matrix with mean/min):
 
@@ -70,11 +88,18 @@ Embedding views (each printed as a 4×4 cosine matrix with mean/min):
 - **first-1.2s** — embedding over the first 1.2 s of speech (the gate's early
   window is 1.2 s of speech by default). If this is inconsistent while longer
   windows are fine, the gate is scoring before it has enough voice.
+- **first-2.5s** — embedding over the first 2.5 s of speech (terminal gate
+  decision point).
+- **first-4s** — embedding over the first 4 s of speech (full-utterance
+  enrollment-style window).
 
 Cross-path cosines show, per phrase, how similar the paths' speech-only
 embeddings are to each other — low values mean the capture path itself
 changes the voice signature. A vs C isolates the effect of Apple's
-processing; C vs D isolates helper vs ffmpeg. The summary table gives mean
+processing; C vs D isolates helper vs ffmpeg; E vs D isolates running the
+helper alongside ffmpeg; F vs E isolates VP DSP from device-hold; F vs D
+isolates bypass-hold. The copy-paste summary covers all selected paths.
+The summary table gives mean
 within-path speech-only cosine, mean score vs profile, and mean level per
 path, plus a one-line verdict naming the most self-consistent path. The
 tool finally prints the whole summary again as one copy-pasteable block

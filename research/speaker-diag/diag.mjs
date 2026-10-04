@@ -2,15 +2,23 @@
 // Run from the repo root: `node research/speaker-diag/diag.mjs` (interactive)
 // or `node research/speaker-diag/diag.mjs --self-test` (no microphone needed).
 //
-// Compares four capture paths (A: helper VP on, AGC off = production default;
-// B: helper VP on + AGC on; C: helper VP on + bypass = raw mic, no processing;
-// D: ffmpeg AVFoundation raw) on the SAME 4 spoken phrases (longer phrases,
-// >= 3 s each, matching the enrollment style in src/commands.ts), using the
-// same metrics + CAM++ embedding pipeline for each clip. Audio stays in memory;
-// nothing is written to disk (except the --self-test's temp `say` files,
-// which are deleted immediately after conversion).
+// Compares six capture paths (A: helper VP on, AGC off; B: helper VP on +
+// AGC on; C: helper VP on + bypass = raw mic, no processing; D: ffmpeg
+// AVFoundation raw; E: ffmpeg raw recorded WHILE the helper runs with VP on,
+// helper started first and kept running with its PCM discarded = planned
+// production setup for speaker verification; F: ffmpeg raw WHILE a bypass
+// helper holds the device (VP-on helper restarted with --bypass on for the
+// recording, since the helper has no runtime bypass toggle; restart latency
+// is printed) = control for whether concurrent-capture attenuation comes
+// from VP DSP or merely from the helper holding the device) on the SAME 4
+// spoken phrases
+// (longer phrases, >= 3 s each, matching the enrollment style in
+// src/commands.ts), using the same metrics + CAM++ embedding pipeline for
+// each clip. Audio stays in memory; nothing is written to disk (except the
+// --self-test's temp `say` files, which are deleted immediately after
+// conversion).
 //
-// Interactive subset: --paths A,C,D (default A,C,D to keep the session short).
+// Interactive subset: --paths E,F,D (default E,F,D to keep the session short).
 //
 // Plain JavaScript on purpose: Node type-strips imported .ts files, but the
 // .mjs entry point itself must parse as JS.
@@ -37,6 +45,8 @@ const SR = 16000;
 const BYTES_PER_SEC = SR * 2;
 const MAX_SEC = 6;
 const FIRST_SPEECH_SEC = 1.2;
+const GATE_WINDOW_SEC = 2.5;
+const ENROLL_WINDOW_SEC = 4;
 
 const PHRASES = [
   // First 4 ENROLL_PHRASES from src/commands.ts: longer natural sentences,
@@ -258,6 +268,15 @@ export function pairwiseStats(vecs) {
   return { mean: n > 0 ? sum / n : NaN, min: n > 0 ? min : NaN, n };
 }
 
+export function sanityPct(audioSec, wallSec) {
+  if (!(audioSec > 0) || !(wallSec > 0)) return 0;
+  return (audioSec / wallSec) * 100;
+}
+
+export function isSampleRateSuspicious(pct) {
+  return pct < 95 || pct > 105;
+}
+
 function fmtCos(v) {
   return Number.isNaN(v) ? "  n/a" : v.toFixed(2).padStart(5);
 }
@@ -293,29 +312,39 @@ export async function analyzePath(name, clips, embedder) {
     const embFull = tryEmbed(embedder, clip.pcm);
     const embSpeech = tryEmbed(embedder, speechPcm);
     const embHead = tryEmbed(embedder, firstSpeechWindow(speechPcm));
+    const embHead25 = tryEmbed(embedder, firstSpeechWindow(speechPcm, GATE_WINDOW_SEC));
+    const embHead40 = tryEmbed(embedder, firstSpeechWindow(speechPcm, ENROLL_WINDOW_SEC));
     if (embFull) r.embFull = embFull;
     if (embSpeech) r.embSpeech = embSpeech;
     if (embHead) r.embHead = embHead;
+    if (embHead25) r.embHead25 = embHead25;
+    if (embHead40) r.embHead40 = embHead40;
     if (profile && embFull) r.scoreFull = scoreSample(profile, embFull);
+    if (profile && embSpeech) r.scoreSpeech = scoreSample(profile, embSpeech);
+    if (profile && embHead25) r.scoreHead25 = scoreSample(profile, embHead25);
+    if (profile && embHead40) r.scoreHead40 = scoreSample(profile, embHead40);
     results.push(r);
   }
 
   console.log(`\n### Path ${name}`);
   for (const r of results) {
     const m = r.metrics;
-    const sanity = m.audioSec > 0 ? (m.audioSec / Math.max(m.wallSec, 1e-3)) * 100 : 0;
-    const flag = Math.abs(sanity - 100) > 5 ? "  <-- SAMPLE-RATE MISMATCH?" : "";
+    const sanity = sanityPct(m.audioSec, m.wallSec);
+    const flag = isSampleRateSuspicious(sanity) ? "  <-- SAMPLE-RATE MISMATCH?" : "";
     console.log(
       ` phrase ${r.phrase}: bytes=${m.bytes} (=${m.audioSec.toFixed(2)}s @16k) vs wall=${m.wallSec.toFixed(2)}s (${sanity.toFixed(0)}%)${flag}`,
     );
+    const gateScores = `score=${r.scoreFull !== undefined ? r.scoreFull.toFixed(3) : "n/a"} score-2.5s=${r.scoreHead25 !== undefined ? r.scoreHead25.toFixed(3) : "n/a"} score-4s=${r.scoreHead40 !== undefined ? r.scoreHead40.toFixed(3) : "n/a"}`;
     console.log(
-      `   rms=${dbStr(m.rmsDb)} peak=${dbStr(m.peakDb)} clip=${m.clipPct.toFixed(2)}% dc=${m.dcOffset.toFixed(4)} vad=${Math.round(m.vadSpeechMs)}ms${m.vadFallback ? " (energy fallback)" : ""} score=${r.scoreFull !== undefined ? r.scoreFull.toFixed(3) : "n/a"}`,
+      `   rms=${dbStr(m.rmsDb)} peak=${dbStr(m.peakDb)} clip=${m.clipPct.toFixed(2)}% dc=${m.dcOffset.toFixed(4)} vad=${Math.round(m.vadSpeechMs)}ms${m.vadFallback ? " (energy fallback)" : ""} ${gateScores}`,
     );
   }
   const labels = results.map((r) => `p${r.phrase}`);
   printMatrix("full-clip cosines:", results.map((r) => r.embFull), labels);
   printMatrix("speech-only cosines:", results.map((r) => r.embSpeech), labels);
   printMatrix("first-1.2s cosines:", results.map((r) => r.embHead), labels);
+  printMatrix("first-2.5s cosines:", results.map((r) => r.embHead25), labels);
+  printMatrix("first-4s cosines:", results.map((r) => r.embHead40), labels);
   return { results, profileThreshold: profile?.suggestedThreshold };
 }
 
@@ -324,6 +353,7 @@ export async function analyzePath(name, clips, embedder) {
 async function captureTimed(startFn, stopFn, maxSec) {
   const chunks = [];
   let captureError;
+  let firstByteAt = 0; // wall clock runs first received byte -> stop
   let speechStarted = false;
   let speechEnded = false;
   let ep;
@@ -346,6 +376,7 @@ async function captureTimed(startFn, stopFn, maxSec) {
   const t0 = Date.now();
   await startFn(
     (chunk) => {
+      if (!firstByteAt) firstByteAt = Date.now();
       chunks.push(chunk);
       try {
         if (ep) ep.push(chunk);
@@ -361,7 +392,8 @@ async function captureTimed(startFn, stopFn, maxSec) {
     if (ep && speechStarted && speechEnded) break;
     await sleep(100);
   }
-  const wallMs = Date.now() - t0;
+  const tEnd = Date.now();
+  const wallMs = firstByteAt ? tEnd - firstByteAt : tEnd - t0;
   try {
     await stopFn();
   } finally {
@@ -423,6 +455,64 @@ function ffmpegCaptureArgs() {
     "s16le",
     "pipe:1",
   ];
+}
+
+async function recordFfmpegWhileHelperRunning() {
+  // Planned production setup for speaker verification: the helper holds the
+  // mic path open with VP on (as during wake/STT) while ffmpeg captures raw
+  // audio concurrently. The helper's processed PCM is discarded.
+  const helperPath = await ensureVoiceIoHelper();
+  const handle = createVoiceIo({ helperPath, voiceProcessing: true });
+  let helperError;
+  await handle.source.start(
+    () => {},
+    (err) => {
+      helperError = err;
+    },
+  );
+  try {
+    if (helperError) throw helperError;
+    const clip = await recordFfmpegClip();
+    if (helperError) throw helperError;
+    return clip;
+  } finally {
+    try {
+      await handle.source.stop();
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+async function recordFfmpegWithBypassHelper() {
+  // Control for E: the helper holds the device with VP DSP bypassed while
+  // ffmpeg captures concurrently. The helper has no runtime bypass toggle
+  // (stdin protocol is PLAY/FINISH/STOP/QUIT only), so the VP-on helper is
+  // restarted with --bypass on for the recording and stopped at record end.
+  // F vs E isolates VP DSP from device-hold; F vs D isolates bypass-hold.
+  const tStart = Date.now();
+  const helperPath = await ensureVoiceIoHelper();
+  const handle = createVoiceIo({ helperPath, voiceProcessing: true, bypass: true });
+  let helperError;
+  await handle.source.start(
+    () => {},
+    (err) => {
+      helperError = err;
+    },
+  );
+  console.log(`Bypass helper ready in ${((Date.now() - tStart) / 1000).toFixed(2)} s (restart latency).`);
+  try {
+    if (helperError) throw helperError;
+    const clip = await recordFfmpegClip();
+    if (helperError) throw helperError;
+    return clip;
+  } finally {
+    try {
+      await handle.source.stop();
+    } finally {
+      await handle.close();
+    }
+  }
 }
 
 async function recordFfmpegClip() {
@@ -503,9 +593,19 @@ const ALL_PATHS = [
   { key: "B", label: "helper VP on + AGC on", record: () => recordHelperClip({ voiceProcessing: true, agc: true }) },
   { key: "C", label: "helper VP on + bypass (raw mic, no processing)", record: () => recordHelperClip({ voiceProcessing: true, bypass: true }) },
   { key: "D", label: "ffmpeg raw", record: () => recordFfmpegClip() },
+  {
+    key: "E",
+    label: "ffmpeg raw WHILE helper VP-on running (planned prod setup)",
+    record: () => recordFfmpegWhileHelperRunning(),
+  },
+  {
+    key: "F",
+    label: "ffmpeg raw WHILE bypass helper running (restart w/ --bypass)",
+    record: () => recordFfmpegWithBypassHelper(),
+  },
 ];
 
-const DEFAULT_PATH_KEYS = ["A", "C", "D"];
+const DEFAULT_PATH_KEYS = ["E", "F", "D"];
 
 export function parsePathsArg(argv) {
   const arg = argv.find((a) => a.startsWith("--paths"));
@@ -514,7 +614,7 @@ export function parsePathsArg(argv) {
   const raw = (eq >= 0 ? arg.slice(eq + 1) : argv[argv.indexOf(arg) + 1] ?? "").toUpperCase();
   const keys = raw.split(",").map((s) => s.trim()).filter(Boolean);
   const valid = keys.filter((k) => ALL_PATHS.some((p) => p.key === k));
-  if (valid.length === 0) throw new Error(`--paths must name a subset of A,B,C,D (got "${raw}")`);
+  if (valid.length === 0) throw new Error(`--paths must name a subset of A,B,C,D,E,F (got "${raw}")`);
   return [...new Set(valid)];
 }
 
@@ -535,7 +635,7 @@ async function interactive(selectedKeys) {
     for (let i = 0; i < PHRASES.length; i++) {
       console.log(`\nSay this (${i + 1}/${PHRASES.length}):`);
       console.log(`  "${PHRASES[i]}"`);
-      await waitEnter("Press Enter to start recording (~3-4 s, stops on silence or 6 s)... ");
+      await waitEnter("Press Enter to start recording (~5 s, stops on silence or 6 s)... ");
       console.log("Recording... speak now.");
       try {
         const clip = await path.record();
@@ -573,7 +673,7 @@ function printCrossPath(byPath) {
   const keys = [...byPath.keys()];
   if (keys.length < 2) return;
   console.log("\n### Cross-path cosines (same phrase, speech-only embeddings)");
-  console.log("A vs C isolates Apple processing; C vs D isolates helper vs ffmpeg.");
+  console.log("A vs C isolates Apple processing; C vs D isolates helper vs ffmpeg; E vs D isolates running the helper alongside ffmpeg; F vs E isolates VP DSP from device-hold; F vs D isolates bypass-hold.");
   for (let p = 1; p <= PHRASES.length; p++) {
     const cells = [];
     for (let i = 0; i < keys.length; i++) {
@@ -693,6 +793,18 @@ async function synthPhrase(phrase) {
 
 async function selfTest() {
   console.log("SELF-TEST: synthesizing 4 phrases with `say` (no microphone, no playback).");
+  const rateChecks = [
+    { pct: 94, want: true },
+    { pct: 100, want: false },
+    { pct: 106, want: true },
+  ];
+  for (const { pct, want } of rateChecks) {
+    if (isSampleRateSuspicious(pct) !== want) {
+      console.error(`SELF-TEST FAIL: isSampleRateSuspicious(${pct}) should be ${want}.`);
+      return 1;
+    }
+  }
+  console.log("self-test rate-flag bounds: 94%=flagged 100%=ok 106%=flagged");
   const embedder = loadEmbedder();
   if (!embedder) {
     console.error("SELF-TEST FAIL: speaker model not cached; embedding pipeline cannot be verified.");
@@ -720,8 +832,14 @@ async function selfTest() {
   const st = pairwiseStats(results.map((r) => r.embSpeech));
   const missingEmb = results.filter((r) => !r.embSpeech).length;
   const silent = results.filter((r) => !Number.isFinite(r.metrics.rmsDb)).length;
-  console.log(`\nself-test checks: embeddings missing=${missingEmb}/4 silent=${silent}/4 within-mean=${fmtCos(st.mean).trim()}`);
-  if (missingEmb > 0 || silent > 0) {
+  const missing25 = results.filter((r) => !r.embHead25).length;
+  const missing40 = results.filter((r) => !r.embHead40).length;
+  const pathKeys = new Set(ALL_PATHS.map((p) => p.key));
+  const pathsWired = ["D", "E", "F"].every((k) => pathKeys.has(k)) &&
+    ALL_PATHS.every((p) => typeof p.record === "function");
+  console.log(`self-test paths wired: D,E,F present=${pathKeys.has("D") && pathKeys.has("E") && pathKeys.has("F")}`);
+  console.log(`\nself-test checks: embeddings missing=${missingEmb}/4 silent=${silent}/4 win-2.5s missing=${missing25}/4 win-4s missing=${missing40}/4 within-mean=${fmtCos(st.mean).trim()}`);
+  if (missingEmb > 0 || silent > 0 || missing25 > 0 || missing40 > 0 || !pathsWired) {
     console.error("SELF-TEST FAIL: pipeline produced no embedding or silence on synthetic speech.");
     return 1;
   }
@@ -736,10 +854,11 @@ async function selfTest() {
 const args = process.argv.slice(2);
 if (args.includes("--help") || args.includes("-h")) {
   console.log("Usage:");
-  console.log("  node research/speaker-diag/diag.mjs [--paths A,C,D] interactive (needs the owner + microphone)");
+  console.log("  node research/speaker-diag/diag.mjs [--paths E,F,D] interactive (needs the owner + microphone)");
   console.log("  node research/speaker-diag/diag.mjs --self-test non-interactive pipeline check via `say`");
-  console.log("Paths: A=helper VP on, AGC off (production default); B=helper VP on+AGC on;");
-  console.log("       C=helper VP on+bypass (raw mic); D=ffmpeg raw. Default: A,C,D.");
+  console.log("Paths: A=helper VP on, AGC off; B=helper VP on+AGC on; C=helper VP on+bypass (raw mic);");
+  console.log("       D=ffmpeg raw; E=ffmpeg raw while helper VP-on runs (planned prod setup);");
+  console.log("       F=ffmpeg raw while bypass helper runs (restart w/ --bypass). Default: E,F,D.");
   process.exit(0);
 }
 
