@@ -135,10 +135,16 @@ Workflow `d1d262b8-430b-483d-a8eb-f1617f40efd5`, 5 researcher reports in subagen
     assigns it back, so DEFAULT ducking turned the owner's media down whenever the helper ran. There is no "off" level; min is the lowest.
 - Owner has NOT yet confirmed my stated assumptions: hold-to-talk; global ⌃⌥Space; ignore wake words the Mac itself plays; when other
   audio plays during dictation, cancel it or stage the transcript in the editor instead of auto-send.
-- Workflow `afdac225-21ff-4784-9ac3-a4ff12965ced`: stage 1 parallel ducking-fix (voice-io.swift), hotkey-helper (native/hotkey.swift,
-  src/hotkey.ts, test/hotkey.test.ts), other-audio-probe (research/other-audio/, compile only, NOT run). Stage 2 ptt-wiring
-  (controller/contracts/prefs/commands/index/README/tests; speakerCheck default off). Stage 3 review. Then: verify, fix, commit. Then ask
-  the owner to run the other-audio probes while THEY play a video (permission prompts appear), then build reference-KWS coincidence rejection.
+- Workflow `afdac225-21ff-4784-9ac3-a4ff12965ced` DONE (all 5 children): ducking fix, hotkey helper, other-audio probe kit,
+  ptt-wiring, review. Reviewer found 1 P1 + 2 P2; workflow `2dd6c487-822f-4a09-b28e-4e0e9cd8e887` fixed all three (release the hold in
+  closeHotkeyListener; reject empty/spacey combo tokens; build the probe bundle in a mktemp -d dir instead of deleting /tmp/TapProbe.app).
+- Delivered: speakerCheck defaults to "off" (opt-in kept); global hold-to-talk via native/hotkey.swift + src/hotkey.ts (Carbon, no TCC
+  permission, default ctrl+option+space, `/voice ptt` show|off|<combo>, runs only while listening, exits on stdin EOF); ducking applies .min;
+  research/other-audio/{tap-probe.swift,sck-probe.swift,build-bundled-tap-probe.sh,README.md} prepared but NOT run.
+- Parent-verified after the fixes: typecheck 0; full suite 528 pass / 0 fail; swiftc 0 for voice-io.swift (only the 2 pre-existing
+  Optional<CFString> warnings), hotkey.swift, tap-probe.swift, sck-probe.swift; `sh -n` on the build script; git diff --check clean.
+- NEXT: commit this batch, then hand the owner the other-audio probe run (they must play a video; permission prompts appear), then build
+  reference-KWS coincidence rejection in the helper/session. Remind the owner to run `/voice speaker off` once (saved state still says normal).
 
 ## Next steps (superseded by the decision above)
 
