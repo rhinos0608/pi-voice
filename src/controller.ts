@@ -166,6 +166,8 @@ export class VoiceController {
   private endpointer: Endpointer | null = null;
   private vadPath: string | null = null;
   private speechHeard = false;
+  /** True between VAD onSpeechStart and onSpeechEnd: only then is capture audio speech. */
+  private vadSpeechOpen = false;
   private speakerGate: {
     push(pcm: Buffer): void;
     decision(): "accept" | "reject" | "pending";
@@ -500,7 +502,7 @@ export class VoiceController {
       } catch {
         // Ignore push errors; STT failure paths report on their own.
       }
-      if (this.speakerGate && this.speechHeard) {
+      if (this.speakerGate && this.vadSpeechOpen) {
         this.speakerGate.push(chunk);
         if (this.speakerGate.decision() === "reject") {
           this.rejectSpeakerUtterance(
@@ -589,6 +591,7 @@ export class VoiceController {
     this.submitted = false;
     this.committed = false;
     this.speechHeard = false;
+    this.vadSpeechOpen = false;
     this.maybeArmSpeakerGate();
     this.lastPartial = "";
     this.meter.reset();
@@ -653,7 +656,9 @@ export class VoiceController {
       };
     }
     this.log("speaker", { decision: result.decision, score: result.score, speechMs: result.speechMs, when });
-    this.speakerGate = null;
+    // The gate stays armed for the rest of the utterance: speech that resumes
+    // after a VAD end (next onSpeechStart) must also be gated. It is re-armed
+    // per utterance in onWake, and pushes only happen while VAD reports speech.
     return true;
   }
 
@@ -665,11 +670,13 @@ export class VoiceController {
         onSpeechStart: (atSec) => {
           if (this.closed || gen !== this.generation || this.phase !== "capture") return;
           this.speechHeard = true;
+          this.vadSpeechOpen = true;
           this.clearNoSpeechTimer();
           this.log("vad-start", { atSec });
         },
         onSpeechEnd: (atSec) => {
           if (this.closed || gen !== this.generation || this.phase !== "capture") return;
+          this.vadSpeechOpen = false;
           this.log("vad-end", { atSec });
           if (!this.settleSpeakerGate("end")) return;
           try {

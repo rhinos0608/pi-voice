@@ -369,6 +369,81 @@ function describeIsolation(env: CommandEnv): string {
   return `${base} (${built}, ${route})`;
 }
 
+/**
+ * Authoritative in-memory speaker profile.
+ *
+ * The controller learns in memory and persists debounced, while speaker
+ * commands (forget / that-was-me / reset-learning / enroll) write the disk
+ * profile directly. Without a single owner, a pending debounced save can
+ * resurrect a forgotten profile or overwrite a correction when it flushes
+ * later (voice off / shutdown / the post-command flush). Every disk write
+ * and every learning update flows through this store: command paths use
+ * saveAndSet/clearAndDelete, the controller's setSpeakerProfile maps to
+ * setCurrent, and the controller's debounced persist maps to flushDirty,
+ * which only writes when the flushed snapshot is still current.
+ *
+ * Disk operations are serialized through a single queue so a delete
+ * always runs after any in-flight save settles. Deletes also bump a
+ * generation counter; a save that started under an older generation
+ * either skips publishing (when the snapshot is no longer current) or
+ * is followed by a delete so a forgotten profile can never come back.
+ */
+export function createSpeakerStore(persist: {
+  save: (profile: SpeakerProfile) => Promise<void>;
+  remove: () => Promise<void>;
+}): {
+  get: () => SpeakerProfile | undefined;
+  setCurrent: (profile: SpeakerProfile | undefined) => void;
+  saveAndSet: (profile: SpeakerProfile) => Promise<void>;
+  clearAndDelete: () => Promise<void>;
+  flushDirty: (dirty: SpeakerProfile) => Promise<boolean>;
+} {
+  let current: SpeakerProfile | undefined;
+  let generation = 0;
+  let tail: Promise<void> = Promise.resolve();
+  const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = tail.then(work, work);
+    tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+  return {
+    get: () => current,
+    setCurrent: (profile) => {
+      current = profile;
+    },
+    saveAndSet: (profile) => {
+      current = profile;
+      const seen = generation;
+      return enqueue(async () => {
+        await persist.save(profile);
+        if (seen !== generation && current === undefined) {
+          await persist.remove();
+        }
+      });
+    },
+    clearAndDelete: () => {
+      current = undefined;
+      generation += 1;
+      return enqueue(() => persist.remove());
+    },
+    flushDirty: (dirty) => {
+      if (current === undefined || current !== dirty) return Promise.resolve(false);
+      const seen = generation;
+      return enqueue(async () => {
+        if (current !== dirty) return false;
+        await persist.save(dirty);
+        if (seen !== generation && current === undefined) {
+          await persist.remove();
+        }
+        return true;
+      });
+    },
+  };
+}
+
 async function describeSpeaker(env: CommandEnv): Promise<string> {
   const prefs = env.getPrefs();
   const sp = env.speaker;

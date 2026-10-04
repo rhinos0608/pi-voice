@@ -15,7 +15,7 @@ import { DEFAULT_PREFERENCES, type AudioSource, type ModelPaths, type VoiceFailu
 import { VoiceController, type VoiceHost } from "./controller.ts";
 import { createDebugLog } from "./debuglog.ts";
 import { analyzePcm, classifyCapture } from "./level.ts";
-import { createAvFoundationSource, FFMPEG_PATH, listMicrophones, withSessionFallback } from "./mic.ts";
+import { createAvFoundationSource, FFMPEG_PATH, listMicrophones, withSessionFallback, withSinkFallback } from "./mic.ts";
 import { ensureVadModel, ensureWakeModel, isVadModelProvisioned, isWakeModelProvisioned, ensureSpeakerModel, speakerModelCachedPath } from "./model.ts";
 import { buildProfile, createSpeakerEmbedder, createSpeakerGate, deleteSpeakerProfile, loadSpeakerProfile, saveSpeakerProfile, type SpeakerProfile } from "./speaker.ts";
 import { createVoiceIo, ensureVoiceIoHelper, VoiceIoError, voiceIoHelperPath, type VoiceIoHandle } from "./voice-io.ts";
@@ -29,6 +29,7 @@ import { createWakeDetector, type WakeGroup } from "./wake.ts";
 import {
   getVoiceCompletions,
   handleVoiceCommand,
+  createSpeakerStore,
   type CommandEnv,
 } from "./commands.ts";
 import { listTtsModels, listVoices } from "./elevenlabs-api.ts";
@@ -233,10 +234,21 @@ export default function voiceExtension(pi: ExtensionAPI): void {
   let voiceIoFallback = false;
   let voiceIoWarned = false;
   let voiceIoInUse = false;
-  let speakerProfile: SpeakerProfile | undefined;
+  /** Single owner of the in-memory speaker profile; see createSpeakerStore. */
+  const speakerStore = createSpeakerStore({
+    save: (profile) => saveSpeakerProfile(profile),
+    remove: () => deleteSpeakerProfile(),
+  });
   let speakerEmbedder: { embed(pcm: Buffer): Float32Array } | undefined;
   let speakerEmbedderKey: string | undefined;
 
+  function noteVoiceIoFallback(notify: (message: string, type: "info" | "warning" | "error") => void): void {
+    voiceIoFallback = true;
+    if (!voiceIoWarned) {
+      voiceIoWarned = true;
+      notify("Voice isolation helper failed; using ffmpeg capture and ffplay playback for this session.", "warning");
+    }
+  }
   function voiceIoRouteKeyFor(helperPath: string): string {
     return `${helperPath}|${prefs.mic.kind === "named" ? prefs.mic.name : "default"}`;
   }
@@ -270,11 +282,11 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
   async function refreshSpeakerState(): Promise<void> {
     try {
-      speakerProfile = await loadSpeakerProfile();
+      speakerStore.setCurrent(await loadSpeakerProfile());
     } catch {
-      speakerProfile = undefined;
+      speakerStore.setCurrent(undefined);
     }
-    if (!speakerProfile || !speakerModelCachedPath()) {
+    if (!speakerStore.get() || !speakerModelCachedPath()) {
       speakerEmbedder = undefined;
       speakerEmbedderKey = undefined;
     }
@@ -282,7 +294,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
   /** Lazily create the session embedder from the cached model path; undefined when the model is missing. */
   function ensureSpeakerEmbedder(): ((pcm: Buffer) => Float32Array) | undefined {
-    if (!speakerProfile) return undefined;
+    if (!speakerStore.get()) return undefined;
     const cached = speakerModelCachedPath();
     if (!cached) return undefined;
     if (!speakerEmbedder || speakerEmbedderKey !== cached) {
@@ -423,11 +435,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         shouldFallback: (err) =>
           err instanceof VoiceIoError && (err.code === "device" || err.code === "engine" || err.code === "exited"),
         onFallback: () => {
-          voiceIoFallback = true;
-          if (!voiceIoWarned) {
-            voiceIoWarned = true;
-            onNotice?.("Voice isolation helper failed to start; using ffmpeg for this session.");
-          }
+          noteVoiceIoFallback(onNotice);
         },
         onPrimaryStart: () => {
           voiceIoInUse = true;
@@ -444,21 +452,30 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     openUtterance: (key, handlers) => startUtterance(key, handlers),
     openSpeech: (opts) => {
       const speechDeps = {
-        sinkFactory: () => ensureVoiceIo()?.createSink() ?? createFfplaySink(),
+        sinkFactory: () => {
+          const io = ensureVoiceIo();
+          if (!io) return createFfplaySink();
+          return withSinkFallback({
+            primary: io.createSink(),
+            createFallback: () => createFfplaySink(),
+            shouldFallback: () => true,
+            onFallback: () => noteVoiceIoFallback((message, type) => host.notify(message, type)),
+          });
+        },
         ...(debug.enabled ? { log: (event: string, data?: Record<string, unknown>) => debug.log(event, data) } : {}),
       };
       return ttsProviderOf(prefs) === "inworld" ? startInworldSpeech(opts, speechDeps) : startSpeech(opts, speechDeps);
     },
     ensureVadModel: (signal: AbortSignal) => ensureVadModel(signal),
     createEndpointer: (modelPath: string, events: EndpointerEvents) => createEndpointer(modelPath, events),
-    getSpeakerCheck: () => (speakerProfile && speakerModelCachedPath() ? prefs.speakerCheck : "off"),
-    getSpeakerProfile: () => speakerProfile,
+    getSpeakerCheck: () => (speakerStore.get() && speakerModelCachedPath() ? prefs.speakerCheck : "off"),
+    getSpeakerProfile: () => speakerStore.get(),
     getSpeakerEmbed: () => ensureSpeakerEmbedder(),
     createSpeakerGate: (opts) => createSpeakerGate(opts as unknown as Parameters<typeof createSpeakerGate>[0]),
     setSpeakerProfile: (profile) => {
-      speakerProfile = profile;
+      speakerStore.setCurrent(profile);
     },
-    saveSpeakerProfile: (profile) => saveSpeakerProfile(profile),
+    saveSpeakerProfile: (profile) => speakerStore.flushDirty(profile).then(() => undefined),
     ...(debug.enabled ? { log: (event: string, data?: Record<string, unknown>) => debug.log(event, data) } : {}),
   });
 
@@ -499,8 +516,8 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       },
       speaker: {
         loadProfile: () => loadSpeakerProfile(),
-        saveProfile: (profile) => saveSpeakerProfile(profile),
-        deleteProfile: () => deleteSpeakerProfile(),
+        saveProfile: (profile) => speakerStore.saveAndSet(profile),
+        deleteProfile: () => speakerStore.clearAndDelete(),
         ensureModel: (signal) => ensureSpeakerModel(signal),
         modelCachedPath: () => speakerModelCachedPath(),
         createEmbedder: (modelPath) => createSpeakerEmbedder(modelPath),

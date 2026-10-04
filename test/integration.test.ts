@@ -10,6 +10,7 @@ import type { EndpointerEvents } from "../src/vad.ts";
 import type { WakeGroup } from "../src/wake.ts";
 import type { VoiceFailure } from "../src/contracts.ts";
 import type { SpeakerProfile } from "../src/speaker.ts";
+import { createSpeakerGate } from "../src/speaker.ts";
 
 type FakeSource = {
   onPcm: ((chunk: Buffer) => void) | null;
@@ -1204,6 +1205,117 @@ describe("speaker gate", () => {
       h.utterances[0].handlers.onFinal("normal words");
       assert.deepEqual(h.host.sent[0], { text: "normal words", opts: undefined });
     }
+  });
+});
+
+describe("speaker gate vad scoping", () => {
+  // 16 kHz s16le mono: 32 bytes per millisecond, so 3200 bytes == 100 ms.
+  const FRAME_100MS = 3200;
+  const speechFrame = (): Buffer => Buffer.alloc(FRAME_100MS, 1);
+  const silenceFrame = (): Buffer => Buffer.alloc(FRAME_100MS, 0);
+
+  function ownerProfile(): SpeakerProfile {
+    return {
+      version: 1,
+      model: "test",
+      dim: 2,
+      centroid: [1, 0],
+      enrolledAt: "2026-01-01T00:00:00Z",
+      enrollScores: [0.9],
+      suggestedThreshold: 0.7,
+      anchors: [[1, 0]],
+    };
+  }
+
+  function armRealGate(h: ReturnType<typeof makeHarness>): {
+    saves: SpeakerProfile[];
+    embeddedBytes: number[];
+  } {
+    const saves: SpeakerProfile[] = [];
+    const embeddedBytes: number[] = [];
+    const box = { profile: ownerProfile() };
+    h.deps.getSpeakerCheck = () => "normal";
+    h.deps.getSpeakerProfile = () => box.profile;
+    h.deps.getSpeakerEmbed = () => () => ({ length: 2, 0: 1, 1: 0 });
+    h.deps.createSpeakerGate = (opts) =>
+      createSpeakerGate({
+        embed: (pcm: Buffer): Float32Array => {
+          embeddedBytes.push(pcm.length);
+          return Float32Array.from([1, 0]);
+        },
+        profile: opts.profile,
+        threshold: opts.threshold,
+      });
+    h.deps.setSpeakerProfile = (p: SpeakerProfile): void => {
+      box.profile = p;
+    };
+    h.deps.saveSpeakerProfile = async (p: SpeakerProfile): Promise<void> => {
+      saves.push(p);
+    };
+    return { saves, embeddedBytes };
+  }
+
+  it("0.8 s speech plus 3 s silence reports speech-only ms and is not learned", async () => {
+    const h = makeHarness({});
+    const { saves, embeddedBytes } = armRealGate(h);
+    await h.controller.start();
+    h.detectors[0]!.fire();
+    // Pre-speech audio never reaches the gate.
+    h.sources[0]!.emit(silenceFrame());
+    h.endpointers[0]!.start(0.5);
+    for (let i = 0; i < 8; i++) h.sources[0]!.emit(speechFrame()); // 0.8 s of speech
+    h.endpointers[0]!.end(1.3);
+    for (let i = 0; i < 30; i++) h.sources[0]!.emit(silenceFrame()); // 3 s trailing silence
+    h.utterances[0]!.handlers.onFinal("owner words here");
+    // The transcript still submits normally; only learning is gated on speech.
+    assert.deepEqual(h.host.sent[0], { text: "owner words here", opts: undefined });
+    // Only the 0.8 s of VAD-flagged speech was embedded: 800 ms, not 800 + 3000.
+    assert.deepEqual(embeddedBytes, [8 * FRAME_100MS]);
+    const speakerLogs = h.logs.filter((l) => l.event === "speaker");
+    const last = speakerLogs.at(-1);
+    assert.ok(last !== undefined, "expected a speaker verdict log");
+    assert.ok(
+      Math.abs((last?.data?.["speechMs"] as number) - 800) < 1,
+      `expected speechMs ~= 800, got ${String(last?.data?.["speechMs"])}`,
+    );
+    // 800 ms is below the 2 s learning minimum: submitted, never learned.
+    assert.equal(saves.length, 0);
+    assert.ok(
+      h.logs.some((l) => l.event === "speaker-learn" && l.data?.["reason"] === "too-short"),
+      "expected a too-short speaker-learn log",
+    );
+  });
+
+  it("two speech segments separated by a pause accumulate in the real gate; pause audio is not", async () => {
+    const h = makeHarness({});
+    const { embeddedBytes } = armRealGate(h);
+    await h.controller.start();
+    h.detectors[0]!.fire();
+    h.endpointers[0]!.start(0.5);
+    const segment = Buffer.alloc(40000, 1); // 1.25 s of speech per segment
+    const pause = Buffer.alloc(6000, 0);
+    h.sources[0]!.emit(segment);
+    assert.equal(h.controller.getPhase(), "capture");
+    h.endpointers[0]!.end(1.0);
+    h.sources[0]!.emit(pause); // pause audio after VAD end
+    h.endpointers[0]!.start(1.8); // speech resumes within the same utterance
+    h.sources[0]!.emit(segment);
+    // STT still receives every frame, pause included; only the gate is filtered.
+    const sttBytes = h.utterances[0]!.pushes.reduce((n, b) => n + b.length, 0);
+    assert.equal(sttBytes, 86000);
+    h.utterances[0]!.handlers.onFinal("owner words here");
+    assert.deepEqual(h.host.sent[0], { text: "owner words here", opts: undefined });
+    // The real gate accumulated both speech segments (2.5 s) and ignored the
+    // pause, with at most one early plus one finalize embedding.
+    assert.equal(embeddedBytes.at(-1), 80000);
+    assert.ok(embeddedBytes.length <= 2, `expected at most 2 embeddings, got ${embeddedBytes.length}`);
+    const speakerLogs = h.logs.filter((l) => l.event === "speaker");
+    const last = speakerLogs.at(-1);
+    assert.ok(last !== undefined, "expected a speaker verdict log");
+    assert.ok(
+      Math.abs((last?.data?.["speechMs"] as number) - 2500) < 1,
+      `expected speechMs ~= 2500, got ${String(last?.data?.["speechMs"])}`,
+    );
   });
 });
 

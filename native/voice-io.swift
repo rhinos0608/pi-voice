@@ -24,7 +24,63 @@
 
 import AVFoundation
 import CoreAudio
+import Darwin
 import Foundation
+
+/// Ignore SIGPIPE so a broken stdout pipe surfaces as an EPIPE write error
+/// instead of killing the process silently. Installed at startup before any
+/// capture write can run.
+_ = signal(SIGPIPE, SIG_IGN)
+
+/// Best-effort fd3 error report for contexts (like the capture tap) where
+/// taking EventSink's lock is unsafe. Uses raw write(2) and never throws.
+private func emitRawError(code: String, message: String) {
+    let line = "{\"event\":\"error\",\"code\":\"\(code)\",\"message\":\"\(message)\"}\n"
+    line.withCString { ptr in
+        var left = strlen(ptr)
+        var cur = ptr
+        while left > 0 {
+            let n = write(3, cur, left)
+            if n < 0 {
+                if errno == EINTR { continue }
+                return
+            }
+            if n == 0 { return }
+            left -= n
+            cur += n
+        }
+    }
+}
+
+/// Write capture bytes to stdout, detecting a broken pipe. On failure the
+/// audio stream is gone, so report on fd 3 (best effort), stop the engine,
+/// and exit non-zero instead of running on silently.
+private func writeCaptureOrDie(engine: AVAudioEngine) -> Never {
+    emitRawError(code: "engine", message: "stdout closed")
+    engine.stop()
+    _exit(3)
+}
+
+private func writeStdoutFully(_ data: Data, engine: AVAudioEngine) {
+    let ok: Bool = data.withUnsafeBytes { raw in
+        guard var cur = raw.baseAddress else { return true }
+        var left = data.count
+        while left > 0 {
+            let n = write(STDOUT_FILENO, cur, left)
+            if n < 0 {
+                if errno == EINTR { continue }
+                return false
+            }
+            if n == 0 { return false }
+            left -= n
+            cur += n
+        }
+        return true
+    }
+    if !ok {
+        writeCaptureOrDie(engine: engine)
+    }
+}
 
 private let kCaptureSampleRate: Double = 16000
 private let kPlaybackSampleRate: Double = 24000
@@ -138,6 +194,15 @@ final class VoiceIo {
     let stdoutHandle = FileHandle.standardOutput
     var captureFormat: AVAudioFormat?
     var playerFormat: AVAudioFormat?
+    /// Serializes every engine/player mutation and every
+    /// check-then-play sequence. AVAudioEngineConfigurationChange
+    /// arrives on an arbitrary thread while PLAY frames are parsed
+    /// on stdin's thread; without serialization a route change can
+    /// pull the player's connection between the connected-check and
+    /// play(), and play() on a disconnected player raises an
+    /// uncaught NSException (SIGABRT), which Swift cannot catch.
+    /// The capture tap never touches this queue (realtime thread).
+    private let audioQueue = DispatchQueue(label: "voice-io.audio")
     let state = NSLock()
     var pendingBuffers = 0
     var finishPending = false
@@ -220,10 +285,17 @@ final class VoiceIo {
         captureFormat = target
 
         engine.attach(player)
-        // NOTE: the player is connected AFTER engine.start(). Connecting
-        // anything to the mixer before start breaks VoiceProcessingIO
-        // init (-10875 kAUInitialize on the output node). Audio rendered
-        // through the engine post-start still feeds the AEC reference.
+        // NOTE: with voice processing the player is connected AFTER
+        // engine.start(): connecting anything to the mixer before start
+        // breaks VoiceProcessingIO init (-10875 kAUInitialize on the
+        // output node). Audio rendered through the engine post-start
+        // still feeds the AEC reference. Without voice processing the
+        // reverse holds: an engine started with no output connections
+        // never wires a player connected post-start, and play() then
+        // raises an uncaught NSException, so connect before start.
+        if !voiceProcessing {
+            engine.connect(player, to: engine.mainMixerNode, format: nil)
+        }
 
         input.installTap(onBus: 0, bufferSize: 4096, format: hwFormat) { [weak self] buffer, _ in
             self?.handleTap(buffer: buffer)
@@ -240,9 +312,17 @@ final class VoiceIo {
                 emitError(code: "engine", message: msg)
             }
         }
-        engine.connect(player, to: engine.mainMixerNode, format: nil)
-        playerFormat = player.outputFormat(forBus: 0)
-        player.play()
+        audioQueue.sync {
+            engine.connect(player, to: engine.mainMixerNode, format: nil)
+            playerFormat = player.outputFormat(forBus: 0)
+            guard safePlay() else {
+                emitError(
+                    code: "engine",
+                    message:
+                        "Playback unavailable: player has no output connection (engineRunning: \(engine.isRunning), connections: \(connectionCount())). Check the output device."
+                )
+            }
+        }
 
         NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
@@ -297,7 +377,7 @@ final class VoiceIo {
         }
         guard status != .error, out.frameLength > 0, let ptr = out.int16ChannelData else { return }
         let bytes = Data(bytes: ptr[0], count: Int(out.frameLength) * 2)
-        try? stdoutHandle.write(contentsOf: bytes)
+        writeStdoutFully(bytes, engine: engine)
     }
 
     private var cachedMonoConverter: (AVAudioConverter, AVAudioFormat)?
@@ -311,16 +391,71 @@ final class VoiceIo {
         return conv
     }
 
+    /// True when the player is attached and has at least one output
+    /// connection in the engine. Must run on audioQueue.
+    private func isPlayerConnected() -> Bool {
+        guard player.engine != nil else { return false }
+        return connectionCount() > 0
+    }
+
+    private func connectionCount() -> Int {
+        guard player.engine != nil else { return 0 }
+        return engine.outputConnectionPoints(for: player, outputBus: 0).count
+    }
+
+    /// Reconnect the player to the mixer when the engine is running.
+    /// A connect issued while the engine is stopped leaves the player
+    /// disconnected, so report false and let the caller surface an
+    /// engine error instead of crashing in play(). Must run on audioQueue.
+    @discardableResult
+    private func ensurePlayerConnection() -> Bool {
+        guard engine.isRunning else { return false }
+        if !isPlayerConnected() {
+            engine.connect(player, to: engine.mainMixerNode, format: nil)
+        }
+        return isPlayerConnected()
+    }
+
+    /// play() raises an uncaught ObjC exception (SIGABRT) unless the
+    /// player is attached, connected, and the engine is running.
+    /// Returns false instead of calling play() when that is not the
+    /// case. Must run on audioQueue so a route change cannot pull the
+    /// connection between the check and the call.
+    @discardableResult
+    private func safePlay() -> Bool {
+        guard engine.isRunning, isPlayerConnected() else { return false }
+        player.play()
+        return true
+    }
+
     func playPCM(_ data: Data) {
         guard !data.isEmpty else { return }
+        let scheduled: Bool = audioQueue.sync {
+            guard ensurePlayerConnection(), safePlay() else {
+                events.emit([
+                    "event": "error", "code": "engine",
+                    "message":
+                        "Playback unavailable: player has no output connection (engineRunning: \(engine.isRunning), connections: \(connectionCount())). Check the output device.",
+                ])
+                return false
+            }
+            return scheduleLocked(data)
+        }
+        _ = scheduled
+    }
+
+    /// Convert 24 kHz mono s16le to the player format and schedule it.
+    /// Must run on audioQueue (engine/player state is settled there).
+    /// Returns false when the payload cannot be scheduled.
+    private func scheduleLocked(_ data: Data) -> Bool {
         let frames = data.count / 2
-        guard frames > 0, let dst = playerFormat else { return }
+        guard frames > 0, let dst = playerFormat else { return false }
         guard
             let srcFmt = AVAudioFormat(
                 commonFormat: .pcmFormatInt16, sampleRate: kPlaybackSampleRate, channels: 1, interleaved: true),
             let inBuf = AVAudioPCMBuffer(pcmFormat: srcFmt, frameCapacity: AVAudioFrameCount(frames)),
             let inCh = inBuf.int16ChannelData
-        else { return }
+        else { return false }
         inBuf.frameLength = AVAudioFrameCount(frames)
         data.withUnsafeBytes { raw in
             guard let s16 = raw.bindMemory(to: Int16.self).baseAddress else { return }
@@ -333,7 +468,7 @@ final class VoiceIo {
         guard
             let outBuf = AVAudioPCMBuffer(pcmFormat: dst, frameCapacity: cap),
             let conv = AVAudioConverter(from: srcFmt, to: dst)
-        else { return }
+        else { return false }
         var supplied = false
         var err: NSError?
         let status: AVAudioConverterOutputStatus = conv.convert(to: outBuf, error: &err) { _, s in
@@ -345,7 +480,7 @@ final class VoiceIo {
             s.pointee = AVAudioConverterInputStatus.haveData
             return inBuf
         }
-        guard status != .error, outBuf.frameLength > 0 else { return }
+        guard status != .error, outBuf.frameLength > 0 else { return false }
         state.lock()
         pendingBuffers += 1
         state.unlock()
@@ -360,6 +495,7 @@ final class VoiceIo {
                 events.emit(["event": "drained"])
             }
         }
+        return true
     }
 
     func finish() {
@@ -377,21 +513,35 @@ final class VoiceIo {
         pendingBuffers = 0
         finishPending = false
         state.unlock()
-        player.stop()
-        player.reset()
-        player.play()
+        audioQueue.sync {
+            player.stop()
+            player.reset()
+            // Best effort: the player stays stopped when the engine is
+            // down; the next PLAY frame reconnects and resumes it.
+            ensurePlayerConnection()
+            safePlay()
+        }
         events.emit(["event": "stopped"])
     }
 
     private func handleRouteChange() {
         events.emit(["event": "route-change"])
-        engine.stop()
-        do {
-            try engine.start()
-            playerFormat = player.outputFormat(forBus: 0)
-            if !player.isPlaying { player.play() }
-        } catch {
-            events.emit(["event": "error", "code": "engine", "message": "Engine restart failed: \(error.localizedDescription)"])
+        // Async: engine.start() can block, and the notification must
+        // not stall the posting thread. Blocks serialize on audioQueue,
+        // so every play() below still follows its connected-check.
+        audioQueue.async { [weak self] in
+            guard let self else { return }
+            self.engine.stop()
+            do {
+                try self.engine.start()
+                // Reconnect the player after the restart: the engine
+                // drops node connections across a configuration change.
+                self.ensurePlayerConnection()
+                self.playerFormat = self.player.outputFormat(forBus: 0)
+                if !self.player.isPlaying { self.safePlay() }
+            } catch {
+                events.emit(["event": "error", "code": "engine", "message": "Engine restart failed: \(error.localizedDescription)"])
+            }
         }
     }
 }

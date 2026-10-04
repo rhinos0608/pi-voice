@@ -176,7 +176,33 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
   let exited = false;
   let exitCode: string | undefined;
   let readyWaiters: { resolve: (rate: number) => void; reject: (err: Error) => void }[] = [];
-  let drainWaiters: (() => void)[] = [];
+  let drainWaiters: { resolve: () => void; reject: (err: Error) => void }[] = [];
+  // Reject callbacks for in-flight sink write/finish promises. Rejected when
+  // the helper dies or its stdout stream ends unexpectedly so callers never hang.
+  const pendingSinkRejects = new Set<(err: Error) => void>();
+  // Last classified helper error (e.g. from an fd3 error event). An
+  // unexpected exit after it reports this code instead of generic "exited".
+  let lastHelperError: VoiceIoError | undefined;
+
+  function failPendingSinkOps(err: Error): void {
+    if (pendingSinkRejects.size === 0) return;
+    const rejects = [...pendingSinkRejects];
+    pendingSinkRejects.clear();
+    for (const reject of rejects) {
+      try {
+        reject(err);
+      } catch {
+        // ignore secondary rejection errors
+      }
+    }
+    for (const w of drainWaiters.splice(0)) {
+      try {
+        w.reject(err);
+      } catch {
+        // ignore secondary rejection errors
+      }
+    }
+  }
   let stopWaiters: (() => void)[] = [];
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   let readyTimer: ReturnType<typeof setTimeout> | undefined;
@@ -278,11 +304,11 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
         clearTimeout(readyTimer);
         readyTimer = undefined;
       }
-      const err = new VoiceIoError("exited", `voice-io helper exited (${exitCode})`);
+      lastHelperError ??= new VoiceIoError("exited", `voice-io helper exited (${exitCode})`);
+      const err = lastHelperError;
       for (const w of readyWaiters) w.reject(err);
       readyWaiters = [];
-      for (const w of drainWaiters) w();
-      drainWaiters = [];
+      failPendingSinkOps(err);
       for (const w of stopWaiters) w();
       stopWaiters = [];
       child = undefined;
@@ -294,6 +320,28 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
         cb(err);
       }
     });
+    // stdout gone while the source is live means the audio stream is gone
+    // even if the process has not exited yet. Surface it the same way.
+    const onStdoutGone = (): void => {
+      if (proc !== child || exited) return;
+      lastHelperError ??= new VoiceIoError("exited", "helper audio stream ended unexpectedly");
+      const err = lastHelperError;
+      for (const w of readyWaiters) w.reject(err);
+      readyWaiters = [];
+      failPendingSinkOps(err);
+      for (const w of stopWaiters) w();
+      stopWaiters = [];
+      if (sourceStarted && sourceOnError) {
+        sourceStarted = false;
+        const cb = sourceOnError;
+        sourceOnPcm = undefined;
+        sourceOnError = undefined;
+        cb(err);
+      }
+    };
+    proc.stdout?.once("end", onStdoutGone);
+    proc.stdout?.once("error", onStdoutGone);
+    proc.stdout?.once("close", onStdoutGone);
   }
 
   function handleEvent(line: string): void {
@@ -315,7 +363,7 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
         log?.("ready", { inputSampleRate: msg.inputSampleRate, voiceProcessing: msg.voiceProcessing });
         break;
       case "drained":
-        for (const w of drainWaiters) w();
+        for (const w of drainWaiters) w.resolve();
         drainWaiters = [];
         log?.("drained");
         break;
@@ -341,7 +389,15 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
           for (const w of readyWaiters) w.reject(err);
           readyWaiters = [];
         } else if (sourceStarted && sourceOnError) {
-          sourceOnError(err);
+          // Post-ready helper errors are fatal for the live source: deliver
+          // once and disarm so the subsequent exit does not notify again.
+          lastHelperError = err;
+          sourceStarted = false;
+          const cb = sourceOnError;
+          sourceOnPcm = undefined;
+          sourceOnError = undefined;
+          failPendingSinkOps(err);
+          cb(err);
         } else {
           log?.("error", { code, message: err.message });
         }
@@ -359,6 +415,7 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
     }
     for (const w of readyWaiters) w.reject(err);
     readyWaiters = [];
+    failPendingSinkOps(err);
     if (sourceStarted && sourceOnError) {
       sourceStarted = false;
       const cb = sourceOnError;
@@ -416,8 +473,20 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
     const ok = stdin.write(frame);
     if (ok) return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
-      stdin.once("drain", () => resolve());
-      stdin.once("error", (err: Error) => reject(err));
+      const onDrain = (): void => {
+        pendingSinkRejects.delete(rejectSink);
+        resolve();
+      };
+      const rejectSink = (err: Error): void => {
+        stdin.removeListener("drain", onDrain);
+        reject(err);
+      };
+      pendingSinkRejects.add(rejectSink);
+      stdin.once("drain", onDrain);
+      stdin.once("error", (err: Error) => {
+        pendingSinkRejects.delete(rejectSink);
+        reject(err);
+      });
     });
   }
 
@@ -508,8 +577,15 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
       async finish(): Promise<void> {
         if (!started || done) return;
         // Register BEFORE writing: drained may arrive immediately.
-        const sawDrained = new Promise<void>((resolve) => {
-          drainWaiters.push(resolve);
+        const sawDrained = new Promise<void>((resolve, reject) => {
+          const entry = { resolve: (): void => {
+            pendingSinkRejects.delete(entry.reject);
+            resolve();
+          }, reject: (err: Error): void => {
+            reject(err);
+          } };
+          drainWaiters.push(entry);
+          pendingSinkRejects.add(entry.reject);
         });
         await writeStdin(encodeFrame(FINISH_FRAME));
         await sawDrained;
@@ -541,8 +617,7 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
     sourceStarted = false;
     sourceOnPcm = undefined;
     sourceOnError = undefined;
-    for (const w of drainWaiters) w();
-    drainWaiters = [];
+    for (const w of drainWaiters.splice(0)) w.resolve();
     for (const w of stopWaiters) w();
     stopWaiters = [];
     if (old && old !== proc) {

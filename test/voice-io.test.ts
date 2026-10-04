@@ -1,7 +1,8 @@
 /** voice-io wrapper tests: fake child process, no real helper binary. */
 
 import { strict as assert } from "node:assert";
-import { describe, it } from "node:test";
+import { spawn } from "node:child_process";
+import { describe, it, type TestContext } from "node:test";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { writeFileSync } from "node:fs";
@@ -179,6 +180,79 @@ describe("voice-io framing", () => {
   });
 });
 
+describe("voice-io unexpected exit", () => {
+  it("delivers unexpected exit once to source onError and rejects pending finish", async () => {
+    const { children, spawnImpl } = makeSpawn();
+    const h = createVoiceIo({ helperPath: "/bin/voice-io", spawnImpl });
+    const errors: (Error & { code?: string })[] = [];
+    const started = h.source.start(
+      () => {},
+      (e) => errors.push(e as Error & { code?: string }),
+    );
+    emitReady(children[0] as FakeChild);
+    await started;
+    const sink = h.createSink();
+    await sink.start({ sampleRate: 24000, channels: 1, encoding: "s16le" });
+    await sink.write(Buffer.from([1, 2]));
+    const finishing = sink.finish();
+    const assertion = assert.rejects(finishing, (err: Error & { code?: string }) => {
+      assert.equal((err as { code?: string }).code, "exited");
+      return true;
+    });
+    (children[0] as FakeChild).emit("exit", 1, null);
+    await assertion;
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0]?.code, "exited");
+    await h.close();
+  });
+
+  it("delivers stdout end to source onError and rejects pending backpressured write", async () => {
+    const { children, spawnImpl } = makeSpawn();
+    const h = createVoiceIo({ helperPath: "/bin/voice-io", spawnImpl });
+    const errors: (Error & { code?: string })[] = [];
+    const started = h.source.start(
+      () => {},
+      (e) => errors.push(e as Error & { code?: string }),
+    );
+    emitReady(children[0] as FakeChild);
+    await started;
+    const sink = h.createSink();
+    await sink.start({ sampleRate: 24000, channels: 1, encoding: "s16le" });
+    const child = children[0] as FakeChild;
+    child.stdin.write = ((chunk: Buffer | string): boolean => {
+      child.stdin.written.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      return false; // never drains
+    }) as FakeStdin["write"];
+    const writing = sink.write(Buffer.from([9, 9]));
+    const assertion = assert.rejects(writing, (err: Error & { code?: string }) => {
+      assert.equal((err as { code?: string }).code, "exited");
+      return true;
+    });
+    child.stdout.emit("end");
+    await assertion;
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0]?.code, "exited");
+    await h.close();
+  });
+
+  it("keeps the preceding error-event code and notifies onError only once across error then exit", async () => {
+    const { children, spawnImpl } = makeSpawn();
+    const h = createVoiceIo({ helperPath: "/bin/voice-io", spawnImpl });
+    const errors: (Error & { code?: string })[] = [];
+    const started = h.source.start(
+      () => {},
+      (e) => errors.push(e as Error & { code?: string }),
+    );
+    emitReady(children[0] as FakeChild);
+    await started;
+    emitEvent(children[0] as FakeChild, { event: "error", code: "engine", message: "stdout closed" });
+    (children[0] as FakeChild).emit("exit", 3, null);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0]?.code, "engine");
+    await h.close();
+  });
+});
+
 describe("voice-io ref-counting", () => {
   it("spawns on first ref and sends QUIT when refs reach 0", async () => {
     const { calls, children, spawnImpl } = makeSpawn();
@@ -308,6 +382,153 @@ describe("voice-io sink", () => {
     assert.equal(frames.filter((f) => f.type === PLAY_FRAME).length, 1);
     assert.ok(frames.some((f) => f.type === STOP_FRAME));
     await h.close();
+  });
+});
+
+describe("voice-io live helper (real binary)", () => {
+  // Exercises the compiled Swift helper instead of the fake child above:
+  // without voice processing the old binary aborted with SIGABRT
+  // ("player started when in a disconnected state") within ~1 s.
+  // Digital silence only; never audible sound.
+  const live = process.platform === "darwin";
+
+  type LiveEvent = { event?: string; code?: string; message?: string };
+  type LiveResult = {
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    events: LiveEvent[];
+    stdoutBytes: number;
+    stderr: string;
+  };
+
+  function encodeLiveFrame(type: number, payload?: Buffer): Buffer {
+    const body = payload ?? Buffer.alloc(0);
+    const header = Buffer.alloc(5);
+    header[0] = type;
+    header.writeUInt32LE(body.length, 1);
+    return Buffer.concat([header, body]);
+  }
+
+  function runHelper(bin: string, args: string[], settleMs: number, frames: Buffer[] = []): Promise<LiveResult> {
+    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe", "pipe"] });
+    const events: LiveEvent[] = [];
+    let stdoutBytes = 0;
+    let stderr = "";
+    let tail = "";
+    child.stdout?.on("data", (d: Buffer) => {
+      stdoutBytes += d.length;
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderr += d.toString("utf8");
+    });
+    const fd3 = child.stdio[3] as unknown as EventEmitter | null;
+    fd3?.on("data", (d: Buffer) => {
+      tail += d.toString("utf8");
+      let idx = tail.indexOf("\n");
+      while (idx >= 0) {
+        const line = tail.slice(0, idx).trim();
+        tail = tail.slice(idx + 1);
+        if (line.length > 0) {
+          try {
+            events.push(JSON.parse(line) as LiveEvent);
+          } catch {
+            // Non-JSON fd3 output is ignored.
+          }
+        }
+        idx = tail.indexOf("\n");
+      }
+    });
+    const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      child.on("exit", (code, signal) => resolve({ code, signal }));
+    });
+    const collect = async (): Promise<LiveResult> => {
+      for (const frame of frames) {
+        await new Promise((r) => setTimeout(r, 800));
+        try {
+          child.stdin?.write(frame);
+        } catch {
+          // Helper already gone; the exit below reports it.
+        }
+      }
+      await new Promise((r) => setTimeout(r, settleMs));
+      try {
+        child.stdin?.end();
+      } catch {
+        // Already gone.
+      }
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const raced = await Promise.race([
+          exit,
+          new Promise<null>((resolve) => {
+            killTimer = setTimeout(() => resolve(null), 8000);
+          }),
+        ]);
+        if (raced === null) {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // Already gone.
+          }
+          const killed = await exit;
+          return { ...killed, events, stdoutBytes, stderr };
+        }
+        return { ...raced, events, stdoutBytes, stderr };
+      } finally {
+        if (killTimer !== undefined) clearTimeout(killTimer);
+      }
+    };
+    return collect();
+  }
+
+  function skipWhenNoMic(t: TestContext, r: LiveResult): boolean {
+    if (r.events.some((e) => e.event === "error" && (e.code === "permission" || e.code === "device"))) {
+      t.skip("microphone unavailable in this environment");
+      return true;
+    }
+    return false;
+  }
+
+  async function liveBinary(t: TestContext): Promise<string | undefined> {
+    try {
+      return await ensureVoiceIoHelper();
+    } catch (err) {
+      t.skip(`helper compile unavailable: ${(err as Error).message}`);
+      return undefined;
+    }
+  }
+
+  it("starts without voice processing and neither aborts nor crashes", { skip: !live, timeout: 55000 }, async (t) => {
+    const bin = await liveBinary(t);
+    if (bin === undefined) return;
+    const r = await runHelper(bin, ["--voice-processing", "off"], 2500);
+    if (skipWhenNoMic(t, r)) return;
+    assert.notEqual(r.signal, "SIGABRT", `helper aborted: ${r.stderr.slice(-500)}`);
+    assert.equal(r.signal, null, `helper killed by signal ${r.signal ?? "unknown"}: ${r.stderr.slice(-500)}`);
+    const ready = r.events.some((e) => e.event === "ready");
+    const engineError = r.events.some((e) => e.event === "error" && e.code === "engine");
+    assert.ok(ready || engineError, `expected ready or an engine error event, got: ${JSON.stringify(r.events)}`);
+    if (ready) assert.ok(r.stdoutBytes > 0, "expected capture bytes on stdout");
+  });
+
+  it("drains one second of digital silence with voice processing on", { skip: !live, timeout: 55000 }, async (t) => {
+    const bin = await liveBinary(t);
+    if (bin === undefined) return;
+    const silence = Buffer.alloc(48000); // 1 s of 24 kHz s16le digital silence
+    const r = await runHelper(bin, ["--voice-processing", "on"], 5000, [
+      Buffer.concat([encodeLiveFrame(PLAY_FRAME, silence), encodeLiveFrame(FINISH_FRAME)]),
+    ]);
+    if (skipWhenNoMic(t, r)) return;
+    assert.ok(
+      r.events.some((e) => e.event === "ready"),
+      `expected a ready event, got: ${JSON.stringify(r.events)}`,
+    );
+    assert.ok(
+      r.events.some((e) => e.event === "drained"),
+      `expected drained after silence, got: ${JSON.stringify(r.events)}`,
+    );
+    assert.equal(r.signal, null, `helper killed by signal ${r.signal ?? "unknown"}: ${r.stderr.slice(-500)}`);
+    assert.equal(r.code, 0, `helper exit code ${r.code ?? "unknown"}: ${r.stderr.slice(-500)}`);
   });
 });
 

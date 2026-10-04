@@ -122,8 +122,11 @@ the session. Notes:
   Voice Isolation** mic mode for the helper's input. That toggle is
   user-selected and cannot be forced on programmatically; it is separate from
   `/voice isolation`.
-- If the helper fails to start (missing device, engine error, crash), voice
-  falls back to ffmpeg/ffplay for the session with a one-time warning.
+- If the helper fails (missing device, engine error, crash, or a mid-session
+  failure after capture started), the session switches to ffmpeg capture and
+  ffplay playback with the one-time warning `Voice isolation helper failed;
+  using ffmpeg capture and ffplay playback for this session.` In-flight
+  speech fails cleanly and capture restarts transparently.
   Microphone-permission denial keeps the existing System Settings guidance.
 - The helper is **never compiled at session start** (like the models, no work
   at startup). `/voice setup` builds it and reports the result.
@@ -157,10 +160,18 @@ enrollment audio lives only in memory and is never written to disk. Delete
   only samples clearing the threshold by a margin with enough speech are
   learned. Enrollment anchors stay fixed and are never evicted, so impostors
   cannot drag the profile away; learned samples live in a diversity-aware
-  bank (up to 64, one speaking condition capped at a quarter of the bank).
+  bank (up to 16, one speaking condition capped at a quarter of the bank).
+  Capacity is capped at 16 because the calibration in
+  `research/speaker-bank/results.md` found coverage saturates by 16 while
+  impostor acceptance rises monotonically with capacity (22.2% at 0, 34.6%
+  at 16, 44.4% at 256 for the most overlapping synthetic voice pair).
+  Learning also never raises the gate: the threshold may ease down at most
+  0.03 below its enrollment value but can never exceed it (the same study
+  showed unbounded learning creeping 0.61 to 0.846 and locking out the
+  owner's own conditions).
   Saves are debounced (at most once per 30 s, flushed on voice off /
   shutdown) and never delay submission. Status shows the bank fill, e.g.
-  `speaker: normal, enrolled 2026-10-04, learned 12/64`.
+  `speaker: normal, enrolled 2026-10-04, learned 12/16`.
 - **False reject?** `/voice speaker that-was-me` learns the last rejected
   utterance as your voice (kept in memory only, for 2 minutes). Samples too
   different from enrollment are refused. `/voice speaker reset-learning`

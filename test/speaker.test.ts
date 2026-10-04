@@ -173,7 +173,11 @@ describe("speaker profile persistence", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-voice-speaker-"));
     try {
       await saveSpeakerProfile(PROFILE, dir);
-      assert.deepEqual(await loadSpeakerProfile(dir), PROFILE);
+      // PROFILE predates enrollThreshold: load migrates it from the enforced gate.
+      assert.deepEqual(await loadSpeakerProfile(dir), {
+        ...PROFILE,
+        enrollThreshold: PROFILE.suggestedThreshold,
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -267,7 +271,7 @@ describe("createSpeakerGate", () => {
     assert.equal(gate.decision(), "reject");
   });
 
-  it("stops accumulating at maxSpeechMs", () => {
+  it("push past maxSpeechMs performs no extra embeddings; finalize scores head and tail", () => {
     let calls = 0;
     const gate = createSpeakerGate({
       embed: (_pcm: Buffer) => {
@@ -281,8 +285,12 @@ describe("createSpeakerGate", () => {
     gate.push(pcmOf(0.6));
     gate.push(pcmOf(0.6));
     assert.equal(gate.decision(), "accept");
-    gate.push(pcmOf(1));
+    gate.push(pcmOf(1)); // speech past maxSpeechMs is retained for the tail window
     assert.equal(calls, 1);
+    const done = gate.finalize();
+    assert.equal(done.decision, "accept");
+    assert.ok(done.speechMs > 900 && done.speechMs <= 1100, `speechMs ${done.speechMs} should be the 1000 ms head window`);
+    assert.ok(calls <= 6, `expected at most 6 embeddings, got ${calls}`);
   });
 
   it("finalize scores short audio and reports insufficient below 600 ms", () => {
@@ -306,6 +314,171 @@ describe("createSpeakerGate", () => {
     assert.equal(gate.decision(), "pending");
     gate.push(pcmOf(1.5));
     assert.equal(gate.decision(), "accept");
+  });
+});
+
+describe("speaker gate provisional accept", () => {
+  const OWNER = new Float32Array([1, 0]);
+  const IMPOSTOR = new Float32Array([0, 1]);
+  const profileOf = (): SpeakerProfile => ({ ...PROFILE, dim: 2, centroid: [1, 0] });
+  /** Deterministic embedder: any 2000-valued sample marks impostor audio. */
+  function contentEmbed(calls: { n: number }): (pcm: Buffer) => Float32Array {
+    return (pcm: Buffer) => {
+      calls.n += 1;
+      for (let i = 0; i + 1 < pcm.length; i += 2) {
+        if (pcm.readInt16LE(i) === 2000) return IMPOSTOR.slice();
+      }
+      return OWNER.slice();
+    };
+  }
+  const gateWithCalls = (calls: { n: number }, threshold = 0.7) =>
+    createSpeakerGate({ embed: contentEmbed(calls), profile: profileOf(), threshold });
+
+  it("2.5 s of speech accumulates past the early verdict and is learnable", () => {
+    const calls = { n: 0 };
+    const gate = gateWithCalls(calls);
+    for (let i = 0; i < 5; i++) gate.push(pcmOf(0.5));
+    assert.equal(gate.decision(), "accept");
+    const done = gate.finalize();
+    assert.equal(done.decision, "accept");
+    assert.ok(done.speechMs > 2400 && done.speechMs < 2600, `speechMs ${done.speechMs} should be ~2500`);
+    assert.ok(done.score !== undefined && done.embedding !== undefined);
+    assert.ok(calls.n <= 2, `expected at most 2 embeddings, got ${calls.n}`);
+    // The finalize result clears the 2 s learning minimum.
+    const res = adaptProfile(profileOf(), {
+      embedding: done.embedding,
+      score: done.score!,
+      speechMs: done.speechMs,
+      threshold: 0.7,
+    });
+    assert.equal(res.reason, "learned");
+    assert.equal(res.adapted, true);
+  });
+
+  it("two segments of 1.25 s accumulate to 2.5 s", () => {
+    const calls = { n: 0 };
+    const gate = gateWithCalls(calls);
+    gate.push(pcmOf(1.25));
+    assert.equal(gate.decision(), "accept");
+    gate.push(pcmOf(1.25)); // resumed speech after a pause keeps accumulating
+    const done = gate.finalize();
+    assert.equal(done.decision, "accept");
+    assert.ok(done.speechMs > 2400 && done.speechMs < 2600, `speechMs ${done.speechMs} should be ~2500`);
+    assert.ok(calls.n <= 2, `expected at most 2 embeddings, got ${calls.n}`);
+  });
+
+  it("provisional accept flips to reject at finalize when later audio is a different speaker", () => {
+    const calls = { n: 0 };
+    const gate = gateWithCalls(calls);
+    gate.push(pcmOf(1.25, 1000));
+    assert.equal(gate.decision(), "accept");
+    gate.push(pcmOf(1.25, 2000)); // different speaker in the later segment
+    assert.equal(gate.decision(), "accept"); // still provisional mid-utterance
+    const done = gate.finalize();
+    assert.equal(done.decision, "reject");
+    assert.equal(gate.decision(), "reject");
+    assert.ok(calls.n <= 2, `expected at most 2 embeddings, got ${calls.n}`);
+  });
+
+  it("early reject is terminal and finalize adds no extra embedding", () => {
+    const calls = { n: 0 };
+    const gate = gateWithCalls(calls);
+    gate.push(pcmOf(1.5, 2000));
+    assert.equal(gate.decision(), "reject");
+    assert.equal(calls.n, 1);
+    gate.push(pcmOf(1.5, 1000)); // late owner audio never revives a reject
+    assert.equal(gate.decision(), "reject");
+    assert.equal(gate.finalize().decision, "reject");
+    assert.equal(calls.n, 1);
+  });
+
+  it("caps learned speech at the head window with at most 6 embeddings", () => {
+    const calls = { n: 0 };
+    const gate = gateWithCalls(calls);
+    for (let i = 0; i < 8; i++) gate.push(pcmOf(0.5)); // 4 s offered, 3 s head window
+    const done = gate.finalize();
+    assert.equal(done.decision, "accept");
+    assert.ok(done.speechMs > 2900 && done.speechMs <= 3100, `speechMs ${done.speechMs} should cap at ~3000`);
+    gate.finalize();
+    assert.ok(calls.n <= 6, `expected at most 6 embeddings, got ${calls.n}`);
+  });
+
+  it("owner speech over two segments then a different speaker flips to reject", () => {
+    const calls = { n: 0 };
+    const gate = gateWithCalls(calls);
+    gate.push(pcmOf(1.25, 1000)); // owner-like speech
+    assert.equal(gate.decision(), "accept");
+    gate.push(pcmOf(1.25, 1000)); // owner-like second segment
+    const mid = gate.finalize(); // VAD-end settle spends the budget
+    assert.equal(mid.decision, "accept");
+    assert.equal(calls.n, 2);
+    gate.push(pcmOf(1.25, 2000)); // a different speaker resumes
+    const done = gate.finalize(); // submission settle must re-score the new speech
+    assert.equal(done.decision, "reject");
+    assert.equal(gate.decision(), "reject");
+    assert.ok(calls.n <= 6, `expected at most 6 embeddings, got ${calls.n}`);
+  });
+
+  it("resume/finalize cycles always reflect the newest speech", () => {
+    const calls = { n: 0 };
+    const gate = gateWithCalls(calls);
+    gate.push(pcmOf(1.25, 1000));
+    assert.equal(gate.finalize().decision, "accept");
+    const afterFirst = calls.n;
+    gate.push(pcmOf(0.5, 1000));
+    assert.equal(gate.finalize().decision, "accept");
+    assert.ok(calls.n > afterFirst, "resumed speech must be re-scored");
+    const afterSecond = calls.n;
+    gate.push(pcmOf(0.5, 1000));
+    assert.equal(gate.finalize().decision, "accept");
+    assert.ok(calls.n > afterSecond, "resumed speech must be re-scored");
+    gate.push(pcmOf(0.5, 2000)); // impostor tail
+    assert.equal(gate.finalize().decision, "reject");
+    assert.ok(calls.n <= 6, `expected at most 6 embeddings, got ${calls.n}`);
+  });
+
+  it("fails closed with reason unverified once the 6-embedding budget is spent", () => {
+    const calls = { n: 0 };
+    const gate = gateWithCalls(calls);
+    gate.push(pcmOf(1.2, 1000)); // early accept, first embedding
+    assert.equal(gate.decision(), "accept");
+    let last = gate.finalize(); // no new speech: no new embedding
+    assert.equal(last.decision, "accept");
+    assert.equal(calls.n, 1);
+    for (let i = 0; i < 5; i++) {
+      gate.push(pcmOf(0.2, 1000)); // owner-like resume
+      last = gate.finalize();
+      assert.equal(last.decision, "accept");
+    }
+    assert.equal(calls.n, 6); // 1 early + 5 rescored finalizes
+    gate.push(pcmOf(0.2, 1000)); // unscored speech remains, budget spent
+    last = gate.finalize();
+    assert.equal(last.decision, "reject");
+    assert.equal(last.reason, "unverified");
+    assert.equal(last.embedding, undefined); // never learned from an unscored verdict
+    assert.ok(calls.n <= 6, `expected at most 6 embeddings, got ${calls.n}`);
+    assert.equal(gate.decision(), "reject");
+  });
+
+  it("long owner-only utterance scores head and tail windows within 6 embeddings", () => {
+    const seen: { first: number; last: number; len: number }[] = [];
+    const gate = createSpeakerGate({
+      embed: (pcm: Buffer) => {
+        seen.push({ first: pcm.readInt16LE(0), last: pcm.readInt16LE(pcm.length - 2), len: pcm.length });
+        return OWNER.slice();
+      },
+      profile: profileOf(),
+      threshold: 0.7,
+    });
+    for (let i = 0; i < 8; i++) gate.push(pcmOf(0.5, 1000 + i)); // 4 s, values 1000..1007
+    const done = gate.finalize();
+    assert.equal(done.decision, "accept");
+    assert.ok(done.speechMs > 2900 && done.speechMs <= 3100, `speechMs ${done.speechMs} should cap at ~3000`);
+    assert.ok(seen.length <= 6, `expected at most 6 embeddings, got ${seen.length}`);
+    const head = seen.find((s) => s.len === 96000 && s.first === 1000);
+    const tail = seen.find((s) => s.len === 96000 && s.last === 1007);
+    assert.ok(head !== undefined, `expected a scored head window, got ${JSON.stringify(seen)}`);
+    assert.ok(tail !== undefined, `expected a scored tail window, got ${JSON.stringify(seen)}`);
   });
 });
 
@@ -529,8 +702,10 @@ describe("online learning", () => {
     const anchorMean = profile.centroid.slice();
     const pull = nv([0.88, Math.sqrt(1 - 0.88 * 0.88)]); // passes the anchor bar, pulls sideways
     assert.ok(cosineSimilarity(pull, anchorMean) >= profile.suggestedThreshold);
-    for (let i = 0; i < LEARN.maxLearned; i++) {
-      const res = adaptProfile(profile, ownerSample(profile, pull));
+    // Capacity is orthogonal here: use a wide bank so the dilution setup holds
+    // regardless of the default maxLearned.
+    for (let i = 0; i < 64; i++) {
+      const res = adaptProfile(profile, ownerSample(profile, pull), undefined, { maxLearned: 64 });
       assert.equal(res.reason, "learned");
       profile = res.profile;
     }
@@ -638,7 +813,11 @@ describe("online learning", () => {
   it("resetLearning drops learned and restores the anchor centroid", () => {
     let profile = enrollOwner();
     const anchorCentroid = new Float32Array(profile.centroid);
-    for (let i = 0; i < 5; i++) profile = adaptProfile(profile, ownerSample(profile)).profile;
+    // Capacity is orthogonal here: a wide bank keeps all five near-identical
+    // setup samples (one condition cluster) instead of refreshing at the cap.
+    for (let i = 0; i < 8 && learnedCount(profile) < 5; i++) {
+      profile = adaptProfile(profile, ownerSample(profile), undefined, { maxLearned: 64 }).profile;
+    }
     assert.equal(learnedCount(profile), 5);
     const reset = resetLearning(profile);
     assert.equal(learnedCount(reset), 0);
@@ -647,11 +826,60 @@ describe("online learning", () => {
     assert.deepEqual(reset.anchors, profile.anchors);
   });
 
+  it("pins enrollThreshold at build and bounds learning-driven drift to [enroll-0.03, enroll]", () => {
+    const profile = enrollOwner();
+    assert.equal(profile.enrollThreshold, profile.suggestedThreshold);
+    const enroll = profile.enrollThreshold!;
+    let cur = profile;
+    // Creep simulation: many high-similarity learned samples must not raise
+    // the threshold above the enrollment value.
+    for (let i = 0; i < 40; i++) {
+      const res = adaptProfile(cur, ownerSample(cur, nv([1, 0.005 + i * 0.0001])));
+      assert.equal(res.reason, "learned");
+      cur = res.profile;
+    }
+    assert.ok(
+      cur.suggestedThreshold <= enroll + 1e-9,
+      `creep: threshold ${cur.suggestedThreshold} rose above enroll ${enroll}`,
+    );
+    assert.ok(
+      cur.suggestedThreshold >= enroll - 0.03 - 1e-9,
+      `drop: threshold ${cur.suggestedThreshold} fell more than 0.03 below enroll ${enroll}`,
+    );
+  });
+
+  it("loads legacy profiles without enrollThreshold from their suggestedThreshold", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "speaker-enroll-thr-"));
+    try {
+      const modern = enrollOwner();
+      const { anchors: _a, learned: _l, enrollThreshold: _e, ...legacy } = modern as SpeakerProfile & Record<string, unknown>;
+      void _a;
+      void _l;
+      void _e;
+      assert.equal("enrollThreshold" in legacy, false);
+      writeFileSync(join(dir, "speaker.json"), JSON.stringify(legacy));
+      const loaded = await loadSpeakerProfile(dir);
+      assert.ok(loaded);
+      assert.equal(loaded.enrollThreshold, loaded.suggestedThreshold);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resetLearning restores suggestedThreshold to enrollThreshold", () => {
+    let profile = enrollOwner();
+    const enroll = profile.enrollThreshold!;
+    for (let i = 0; i < 5; i++) profile = adaptProfile(profile, ownerSample(profile)).profile;
+    const reset = resetLearning(profile);
+    assert.equal(reset.suggestedThreshold, enroll);
+    assert.equal(reset.enrollThreshold, enroll);
+  });
+
   it("LEARN exposes the documented provisional knobs", () => {
     assert.deepEqual({ ...LEARN }, {
       margin: 0.05,
       minSpeechMs: 2000,
-      maxLearned: 64,
+      maxLearned: 16,
       anchorWeight: 0.3,
       maxThresholdStep: 0.02,
       correctionSlack: 0.15,

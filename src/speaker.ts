@@ -26,6 +26,8 @@ export type SpeakerProfile = {
   enrollScores: number[];
   /** Per-user accept threshold derived from enrollScores; see suggestedThresholdFor. Provisional until calibrated on the owner's real voice. */
   suggestedThreshold: number;
+  /** Enrollment-time threshold snapshot from buildProfile. Learning may move suggestedThreshold only within [enrollThreshold - 0.03, enrollThreshold] so adaptation cannot creep above the enrollment gate. Absent on pre-change profiles, which fall back to their current suggestedThreshold. */
+  enrollThreshold?: number;
   /** Enrollment embeddings (one per clip), stored by buildProfile. Absent on pre-change profiles; those treat [centroid] as the single anchor. */
   anchors?: number[][];
   /** Owner-voice samples learned during normal use (FIFO-capped). */
@@ -138,6 +140,7 @@ export function buildProfile(embeddings: Float32Array[], model: string): Speaker
     return cosineSimilarity(heldOut, normalize(rest));
   });
   const anchors = embeddings.map((e) => Array.from(e));
+  const suggestedThreshold = suggestedThresholdFor(enrollScores);
   const profile: SpeakerProfile = {
     version: 1,
     model,
@@ -145,7 +148,8 @@ export function buildProfile(embeddings: Float32Array[], model: string): Speaker
     centroid: Array.from(centroid),
     enrolledAt: new Date().toISOString(),
     enrollScores,
-    suggestedThreshold: suggestedThresholdFor(enrollScores),
+    suggestedThreshold,
+    enrollThreshold: suggestedThreshold,
     anchors,
     learned: [],
   };
@@ -257,6 +261,14 @@ export async function loadSpeakerProfile(
     (r["suggestedThreshold"] as number) < 1
       ? (r["suggestedThreshold"] as number)
       : SPEAKER_THRESHOLDS.normal;
+  // Legacy profiles predate enrollThreshold: anchor the learning window to
+  // whatever gate they currently enforce.
+  const enrollThreshold =
+    typeof r["enrollThreshold"] === "number" &&
+    (r["enrollThreshold"] as number) > 0 &&
+    (r["enrollThreshold"] as number) < 1
+      ? (r["enrollThreshold"] as number)
+      : suggestedThreshold;
   const profile: SpeakerProfile = {
     version: 1,
     model: r["model"] as string,
@@ -265,6 +277,7 @@ export async function loadSpeakerProfile(
     enrolledAt: r["enrolledAt"] as string,
     enrollScores: (r["enrollScores"] as unknown[]).filter((v): v is number => typeof v === "number"),
     suggestedThreshold,
+    enrollThreshold,
   };
   const anchors = parseAnchors(r["anchors"], dim);
   if (anchors !== undefined) profile.anchors = anchors;
@@ -334,15 +347,19 @@ export type SpeakerGateOptions = {
   maxSpeechMs?: number;
 };
 
+export type SpeakerGateResult = {
+  decision: "accept" | "reject" | "insufficient";
+  score?: number;
+  speechMs: number;
+  embedding?: Float32Array;
+  /** Present on fail-closed rejects: the embedding budget ran out with unscored speech. */
+  reason?: "unverified";
+};
+
 export type SpeakerGate = {
   push(pcm16k: Buffer): void;
   decision(): "accept" | "reject" | "pending";
-  finalize(): {
-    decision: "accept" | "reject" | "insufficient";
-    score?: number;
-    speechMs: number;
-    embedding?: Float32Array;
-  };
+  finalize(): SpeakerGateResult;
   reset(): void;
   /** The embedding scored by the mid-utterance decision path / finalize, if any. No extra embedding is computed. */
   lastEmbedding(): Float32Array | undefined;
@@ -353,60 +370,135 @@ const MS_PER_BYTE = 1000 / (SPEAKER_SAMPLE_RATE * 2);
 /**
  * Gate wake audio against the enrolled profile. The caller pushes only
  * speech-flagged s16le 16 kHz PCM. Audio accumulates until minSpeechMs
- * (default 1200), at which point the buffered audio is embedded once and
- * the verdict is cached; accumulation stops at maxSpeechMs (default 3000).
- * finalize() embeds whatever exists below minSpeechMs (< 600 ms of audio
- * is "insufficient" without embedding).
+ * (default 1200), at which point the head window is embedded once.
+ * An early "reject" is terminal and aborts the utterance immediately.
+ * An early "accept" is provisional: speech keeps accumulating and
+ * finalize() re-scores whenever speech arrived since the last scoring, so
+ * the final verdict (and learning) reflects the whole utterance, including
+ * speech that resumed after a pause. finalize() never returns a verdict
+ * computed on stale audio.
+ *
+ * Two windows are scored: the head (the first maxSpeechMs of speech, which
+ * is also the only window ever offered for learning) and, when the utterance
+ * holds more than maxSpeechMs, the tail (the most recent maxSpeechMs). The
+ * final decision is reject when either window rejects. finalize() embeds
+ * whatever exists below minSpeechMs (< 600 ms of audio is "insufficient"
+ * without embedding).
+ *
+ * Embedding budget: at most 6 embeddings per utterance. Measured 2026-10-04
+ * against the cached CAM++ model (3D-Speaker, dim 512) via sherpa-onnx:
+ * 1 s of audio embeds in median 20.1 ms / p95 20.9 ms, 3 s in median
+ * 51.1 ms / p95 52.0 ms (20 runs each). Six worst-case 3 s embeddings cost
+ * ~310 ms, paid only across the end-of-utterance settles; a typical
+ * utterance needs 2-3 (early + head + tail). When the budget is spent while
+ * unscored speech remains, finalize() fails closed: decision "reject" with
+ * reason "unverified" and no embedding, so the controller submits nothing
+ * and learns nothing from the unverified audio.
  */
 export function createSpeakerGate(opts: SpeakerGateOptions): SpeakerGate {
   const minSpeechMs = opts.minSpeechMs ?? 1200;
   const maxSpeechMs = opts.maxSpeechMs ?? 3000;
+  const MAX_EMBEDS = 6;
   let chunks: Buffer[] = [];
   let bytes = 0;
-  let verdict: "accept" | "reject" | undefined;
-  let score: number | undefined;
+  let embeds = 0;
+  type Scored = { embedding: Float32Array; score: number; verdict: "accept" | "reject" };
+  let head: (Scored & { windowBytes: number }) | undefined;
+  let tail: (Scored & { total: number }) | undefined;
   let lastScored: Float32Array | undefined;
+  let failedClosed = false;
+  const maxBytes = Math.floor((maxSpeechMs * SPEAKER_SAMPLE_RATE * 2) / 1000);
 
   function speechMs(): number {
     return bytes * MS_PER_BYTE;
   }
-
-  function evaluate(): void {
-    const buf = Buffer.concat(chunks);
+  function headWindowBytes(): number {
+    return Math.min(bytes, maxBytes);
+  }
+  function headWindowMs(): number {
+    return headWindowBytes() * MS_PER_BYTE;
+  }
+  function scoreWindow(buf: Buffer): Scored {
     const emb = opts.embed(buf);
+    embeds += 1;
     lastScored = emb;
-    score = scoreSample(opts.profile, emb);
-    verdict = score >= opts.threshold ? "accept" : "reject";
+    const score = scoreSample(opts.profile, emb);
+    return { embedding: emb, score, verdict: score >= opts.threshold ? "accept" : "reject" };
+  }
+  function rejected(s: Scored): SpeakerGateResult {
+    return { decision: "reject", score: s.score, speechMs: headWindowMs(), embedding: s.embedding };
+  }
+  function failClosed(): SpeakerGateResult {
+    failedClosed = true;
+    return { decision: "reject", reason: "unverified", speechMs: headWindowMs() };
+  }
+  function terminalReject(): boolean {
+    return failedClosed || head?.verdict === "reject" || tail?.verdict === "reject";
+  }
+
+  // Score the windows that grew since the last scoring. A repeat finalize
+  // with no new speech embeds nothing. All speech is retained so the tail
+  // window (most recent maxSpeechMs) stays available.
+  function scoreFresh(): SpeakerGateResult {
+    const full = Buffer.concat(chunks);
+    if (head === undefined || head.windowBytes < headWindowBytes()) {
+      if (embeds >= MAX_EMBEDS) return failClosed();
+      const scored = scoreWindow(full.subarray(0, headWindowBytes()));
+      head = { ...scored, windowBytes: headWindowBytes() };
+      if (head.verdict === "reject") return rejected(head);
+    }
+    if (bytes > maxBytes && (tail === undefined || tail.total !== bytes)) {
+      if (embeds >= MAX_EMBEDS) return failClosed();
+      const scored = scoreWindow(full.subarray(bytes - maxBytes, bytes));
+      tail = { ...scored, total: bytes };
+      if (tail.verdict === "reject") return rejected(tail);
+    }
+    const done = head;
+    // Unreachable: scoreFresh runs only when head is missing (scored above)
+    // or a window was stale (head present). Guard for the type checker.
+    if (done === undefined) return failClosed();
+    // Learning always uses the head window: its embedding and its speechMs.
+    return { decision: done.verdict, score: done.score, speechMs: headWindowMs(), embedding: done.embedding };
+  }
+
+  function result(): SpeakerGateResult {
+    if (failedClosed) return { decision: "reject", reason: "unverified", speechMs: headWindowMs() };
+    if (head?.verdict === "reject") return rejected(head);
+    if (tail?.verdict === "reject") return rejected(tail);
+    if (head === undefined) {
+      // Not enough speech to score: report insufficient without embedding.
+      if (speechMs() < 600) return { decision: "insufficient", speechMs: speechMs() };
+      return scoreFresh();
+    }
+    const needHead = head.windowBytes < headWindowBytes();
+    const needTail = bytes > maxBytes && (tail === undefined || tail.total !== bytes);
+    if (!needHead && !needTail) {
+      return { decision: head.verdict, score: head.score, speechMs: headWindowMs(), embedding: head.embedding };
+    }
+    return scoreFresh();
   }
 
   return {
     push(pcm16k: Buffer): void {
-      if (verdict !== undefined) return;
-      if (speechMs() >= maxSpeechMs) {
-        evaluate();
-        return;
-      }
+      // A reject is terminal: the controller aborts the utterance mid-stream.
+      if (terminalReject()) return;
       chunks.push(pcm16k);
       bytes += pcm16k.length;
-      if (speechMs() >= minSpeechMs) evaluate();
+      // Mid-utterance stays provisional after the early verdict; re-scoring
+      // happens in finalize(), not on every frame.
+      if (head !== undefined) return;
+      if (speechMs() < minSpeechMs) return;
+      const full = Buffer.concat(chunks);
+      const scored = scoreWindow(full.subarray(0, headWindowBytes()));
+      head = { ...scored, windowBytes: headWindowBytes() };
     },
     decision(): "accept" | "reject" | "pending" {
-      return verdict ?? "pending";
+      if (terminalReject()) return "reject";
+      if (head === undefined) return "pending";
+      return head.verdict;
     },
-    finalize(): {
-      decision: "accept" | "reject" | "insufficient";
-      score?: number;
-      speechMs: number;
-      embedding?: Float32Array;
-    } {
-      const ms = speechMs();
-      if (verdict !== undefined)
-        return { decision: verdict, score, speechMs: ms, ...(lastScored ? { embedding: lastScored } : {}) };
-      if (ms < 600) return { decision: "insufficient", speechMs: ms };
-      evaluate();
-      if (verdict === undefined) return { decision: "insufficient", speechMs: ms };
-      const done: "accept" | "reject" = verdict;
-      return { decision: done, score, speechMs: ms, ...(lastScored ? { embedding: lastScored } : {}) };
+    finalize(): SpeakerGateResult {
+      return result();
     },
     lastEmbedding(): Float32Array | undefined {
       return lastScored;
@@ -414,9 +506,11 @@ export function createSpeakerGate(opts: SpeakerGateOptions): SpeakerGate {
     reset(): void {
       chunks = [];
       bytes = 0;
-      verdict = undefined;
-      score = undefined;
+      embeds = 0;
+      head = undefined;
+      tail = undefined;
       lastScored = undefined;
+      failedClosed = false;
     },
   };
 }
@@ -450,8 +544,8 @@ export const LEARN: LearnConfig = {
   margin: 0.05,
   /** Minimum scored speech duration (ms) before a sample is learned. */
   minSpeechMs: 2000,
-  /** Capacity of the learned reservoir bank. */
-  maxLearned: 64,
+  /** Capacity of the learned reservoir bank. Kept at 16: calibration (research/speaker-bank/results.md) found coverage saturates by 16 while impostor acceptance rises monotonically with capacity (22.2% at 0, 34.6% at 16, 44.4% at 256 for the most overlapping synthetic voice). */
+  maxLearned: 16,
   /** Minimum share of total centroid weight carried by enrollment anchors. */
   anchorWeight: 0.3,
   /** Maximum allowed threshold move per adaptation, in either direction. */
@@ -594,12 +688,20 @@ function rebuildProfile(
 ): SpeakerProfile {
   const centroid = recomputeCentroid(anchors, learned, cfg);
   const raw = suggestedThresholdFor(looScoresFor([...anchors, ...learned.map((s) => s.v)]));
+  // Pin learning to the enrollment window: clamp the raw target into
+  // [enrollThreshold - 0.03, enrollThreshold] first, then apply the per-update
+  // step limit. Calibration (research/speaker-bank/results.md) showed clean-clip
+  // learning otherwise creeps the threshold upward (0.61 to 0.846 for one owner)
+  // and locks out the owner's own corner conditions, so learning may ease the
+  // gate down slightly but never raise it above the enrollment value.
+  const enroll = profile.enrollThreshold ?? profile.suggestedThreshold;
+  const windowed = Math.min(Math.max(raw, enroll - 0.03), enroll);
   return {
     ...profile,
     anchors,
     learned,
     centroid,
-    suggestedThreshold: stepLimitedThreshold(profile.suggestedThreshold, raw, cfg),
+    suggestedThreshold: stepLimitedThreshold(profile.suggestedThreshold, windowed, cfg),
   };
 }
 
@@ -717,15 +819,17 @@ export function addCorrection(
   };
 }
 
-/** Drop learned samples and recompute the centroid/threshold from anchors only. Pure. */
+/** Drop learned samples, restore the anchor centroid, and restore the enrollment gate. Pure. */
 export function resetLearning(profile: SpeakerProfile): SpeakerProfile {
   const anchors = anchorsOf(profile);
+  const enrollThreshold = profile.enrollThreshold ?? profile.suggestedThreshold;
   return {
     ...profile,
     anchors: profile.anchors ?? [profile.centroid],
     learned: [],
     centroid: normalizedMeanVecs(anchors),
-    suggestedThreshold: suggestedThresholdFor(looScoresFor(anchors)),
+    suggestedThreshold: enrollThreshold,
+    enrollThreshold,
   };
 }
 

@@ -1,5 +1,5 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import type { AudioSource, MicDevice, VoicePreferences } from "./contracts.ts";
+import type { AudioSink, AudioSource, MicDevice, VoicePreferences } from "./contracts.ts";
 
 /** Absolute ffmpeg binary used for AVFoundation capture. */
 export const FFMPEG_PATH = "/opt/miniconda3/bin/ffmpeg";
@@ -82,7 +82,11 @@ export type AvFoundationSource = AudioSource & {
  * Wrap a primary AudioSource with a one-way session fallback (voice-isolation
  * helper -> ffmpeg). The first start() failure matching shouldFallback swaps
  * to createFallback() permanently; later starts go straight to the fallback.
- * Non-matching errors (e.g. permission) propagate to existing guidance.
+ * A matching runtime error (the primary's onError) swaps the same way:
+ * the primary is stopped best-effort, the fallback is started with the live
+ * callbacks, and the session never sees the failure — capture restarts
+ * transparently. Non-matching errors (e.g. permission) propagate to existing
+ * guidance on both paths.
  */
 export function withSessionFallback(opts: {
   primary: AudioSource;
@@ -93,23 +97,76 @@ export function withSessionFallback(opts: {
 }): AudioSource {
   let current = opts.primary;
   let usingPrimary = true;
+  // Session generation: incremented on every stop() so a fallback start
+  // that resolves after the session was stopped (or restarted) can be
+  // recognised as stale, shut down, and never wired to live callbacks.
+  let generation = 0;
+  let stopped = true;
+  let pendingFallbackStart: Promise<void> | undefined;
+  function swapToFallback(): AudioSource {
+    usingPrimary = false;
+    opts.onFallback();
+    current = opts.createFallback();
+    return current;
+  }
   return {
     start: async (onPcm: (chunk: Buffer) => void, onError: (error: Error) => void): Promise<void> => {
+      generation += 1;
+      const myGeneration = generation;
+      stopped = false;
+      const live = (): boolean => !stopped && myGeneration === generation;
+      const guardedOnPcm = (chunk: Buffer): void => {
+        if (live()) onPcm(chunk);
+      };
+      const guardedOnError = (error: Error): void => {
+        if (!live()) return;
+        if (usingPrimary && opts.shouldFallback(error)) {
+          const previous = current;
+          const next = swapToFallback();
+          void previous.stop().catch(() => undefined);
+          const pending: Promise<void> = (async () => {
+            await next.start(guardedOnPcm, guardedOnError);
+          })();
+          pendingFallbackStart = pending;
+          pending.catch((err: unknown) => {
+            if (live()) onError(err instanceof Error ? err : new Error(String(err)));
+          });
+          return;
+        }
+        onError(error);
+      };
       try {
-        await current.start(onPcm, onError);
-        if (usingPrimary) opts.onPrimaryStart?.();
+        await current.start(guardedOnPcm, guardedOnError);
+        if (usingPrimary && live()) opts.onPrimaryStart?.();
       } catch (err) {
         if (usingPrimary && opts.shouldFallback(err)) {
+          if (!live()) return;
           usingPrimary = false;
           opts.onFallback();
           current = opts.createFallback();
-          await current.start(onPcm, onError);
+          const next = current;
+          const pending: Promise<void> = (async () => {
+            await next.start(guardedOnPcm, guardedOnError);
+          })();
+          pendingFallbackStart = pending;
+          await pending;
         } else {
           throw err;
         }
       }
     },
-    stop: () => current.stop(),
+    stop: async () => {
+      stopped = true;
+      generation += 1;
+      // A fallback start may still be in flight (runtime swap resolves
+      // asynchronously). Await it so the capture process cannot start
+      // after voice was stopped, then stop whatever source is current —
+      // its callbacks are stale-guarded, so no late PCM can be delivered.
+      const pending = pendingFallbackStart;
+      pendingFallbackStart = undefined;
+      await pending?.catch(() => undefined);
+      await current.stop();
+    },
   };
 }
 
@@ -335,4 +392,53 @@ export function createAvFoundationSource(
     resolvedInput,
   };
   return source;
+}
+
+type SinkFormat = { sampleRate: 24000; channels: 1; encoding: "s16le" };
+
+/**
+ * Wrap a primary AudioSink (the voice-isolation helper sink) with a one-way
+ * fallback (ffplay). A matching op failure swaps permanently and the failed
+ * op is retried once on the fallback, so in-flight speech is rescued
+ * instead of hanging; when the fallback also fails the error propagates so
+ * the speech fails cleanly. Non-matching errors propagate untouched.
+ */
+export function withSinkFallback(opts: {
+  primary: AudioSink;
+  createFallback: () => AudioSink;
+  shouldFallback: (err: unknown) => boolean;
+  onFallback: () => void;
+}): AudioSink {
+  let current = opts.primary;
+  let usingPrimary = true;
+  let format: SinkFormat | undefined;
+  let fallbackStarted = false;
+  async function ensureFallbackStarted(): Promise<void> {
+    if (fallbackStarted) return;
+    if (!format) throw new Error("sink fallback used before start");
+    await current.start(format);
+    fallbackStarted = true;
+  }
+  async function run<T>(op: (sink: AudioSink) => Promise<T>): Promise<T> {
+    try {
+      return await op(current);
+    } catch (err) {
+      if (!usingPrimary || !opts.shouldFallback(err)) throw err;
+      usingPrimary = false;
+      fallbackStarted = false;
+      opts.onFallback();
+      current = opts.createFallback();
+      await ensureFallbackStarted();
+      return await op(current);
+    }
+  }
+  return {
+    start: (next: SinkFormat) => {
+      format = next;
+      return run((sink) => sink.start(next));
+    },
+    write: (chunk: Buffer) => run((sink) => sink.write(chunk)),
+    finish: () => run((sink) => sink.finish()),
+    stop: () => run((sink) => sink.stop()),
+  };
 }

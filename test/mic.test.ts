@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createAvFoundationSource, listMicrophones, MicError, parseMicrophoneList, withSessionFallback } from "../src/mic.ts";
+import { createAvFoundationSource, listMicrophones, MicError, parseMicrophoneList, withSessionFallback, withSinkFallback } from "../src/mic.ts";
+import type { AudioSink, AudioSource } from "../src/contracts.ts";
 
 const LISTING = `[AVFoundation indev @ 0x123] AVFoundation video devices:
 [AVFoundation indev @ 0x123] [0] FaceTime HD Camera
@@ -446,4 +447,234 @@ test("withSessionFallback propagates non-matching errors without swapping", asyn
   await assert.rejects(() => src.start(() => {}, () => {}), /permission denied/);
   assert.equal(fallback.starts, 0);
   assert.equal(notices, 0);
+});
+
+function controllableSource(): {
+  source: AudioSource;
+  onPcm: (chunk: Buffer) => void;
+  onError: (error: Error) => void;
+  starts: () => number;
+  stops: () => number;
+} {
+  let starts = 0;
+  let stops = 0;
+  let onPcm: (chunk: Buffer) => void = () => {};
+  let onError: (error: Error) => void = () => {};
+  return {
+    source: {
+      start: async (pcm, err): Promise<void> => {
+        starts++;
+        onPcm = pcm;
+        onError = err;
+      },
+      stop: async (): Promise<void> => {
+        stops++;
+      },
+    },
+    get onPcm(): (chunk: Buffer) => void {
+      return onPcm;
+    },
+    get onError(): (error: Error) => void {
+      return onError;
+    },
+    starts: () => starts,
+    stops: () => stops,
+  };
+}
+
+test("withSessionFallback swaps capture on a matching runtime error without notifying the session", async () => {
+  const primary = controllableSource();
+  const fallback = controllableSource();
+  let notices = 0;
+  const src = withSessionFallback({
+    primary: primary.source,
+    createFallback: () => fallback.source,
+    shouldFallback: (err) => (err as Error).message.includes("device"),
+    onFallback: () => {
+      notices++;
+    },
+  });
+  const seen: Error[] = [];
+  const chunks: Buffer[] = [];
+  await src.start(
+    (c) => chunks.push(c),
+    (e) => seen.push(e),
+  );
+  primary.onError(new Error("helper device gone"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notices, 1);
+  assert.equal(fallback.starts(), 1);
+  assert.equal(seen.length, 0);
+  fallback.onPcm(Buffer.from([1, 2]));
+  assert.equal(chunks.length, 1);
+  await src.stop();
+  assert.equal(fallback.stops(), 1);
+});
+
+test("withSessionFallback keeps runtime permission errors on the guidance path", async () => {
+  const primary = controllableSource();
+  const fallback = controllableSource();
+  let notices = 0;
+  const src = withSessionFallback({
+    primary: primary.source,
+    createFallback: () => fallback.source,
+    shouldFallback: (err) => (err as Error).message.includes("device"),
+    onFallback: () => {
+      notices++;
+    },
+  });
+  const seen: Error[] = [];
+  await src.start(
+    () => {},
+    (e) => seen.push(e),
+  );
+  primary.onError(new Error("permission denied"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(seen.length, 1);
+  assert.match(seen[0]?.message ?? "", /permission denied/);
+  assert.equal(fallback.starts(), 0);
+  assert.equal(notices, 0);
+  await src.stop();
+});
+
+function fakeSink(fail?: { on: "start" | "write" | "finish"; error: Error }): {
+  sink: AudioSink;
+  starts: () => number;
+  writes: () => number;
+} {
+  let starts = 0;
+  let writes = 0;
+  return {
+    starts: () => starts,
+    writes: () => writes,
+    sink: {
+      start: async (): Promise<void> => {
+        starts++;
+        if (fail?.on === "start") throw fail.error;
+      },
+      write: async (): Promise<void> => {
+        writes++;
+        if (fail?.on === "write") throw fail.error;
+      },
+      finish: async (): Promise<void> => {
+        if (fail?.on === "finish") throw fail.error;
+      },
+      stop: async (): Promise<void> => {},
+    },
+  };
+}
+
+const SINK_FORMAT = { sampleRate: 24000 as const, channels: 1 as const, encoding: "s16le" as const };
+
+test("withSinkFallback rescues a speech when the helper sink dies mid-write", async () => {
+  const helperErr = new Error("voice-io helper exited");
+  const primary = fakeSink({ on: "write", error: helperErr });
+  const fallback = fakeSink();
+  let notices = 0;
+  const sink = withSinkFallback({
+    primary: primary.sink,
+    createFallback: () => fallback.sink,
+    shouldFallback: () => true,
+    onFallback: () => {
+      notices++;
+    },
+  });
+  await sink.start(SINK_FORMAT);
+  await sink.write(Buffer.from([1, 2, 3, 4]));
+  await sink.finish();
+  assert.equal(notices, 1);
+  assert.equal(fallback.starts(), 1);
+  assert.equal(fallback.writes(), 1);
+});
+
+test("withSinkFallback fails cleanly when the fallback also fails", async () => {
+  const helperErr = new Error("voice-io helper exited");
+  const primary = fakeSink({ on: "write", error: helperErr });
+  const fallback = fakeSink({ on: "write", error: new Error("ffplay gone") });
+  let notices = 0;
+  const sink = withSinkFallback({
+    primary: primary.sink,
+    createFallback: () => fallback.sink,
+    shouldFallback: () => true,
+    onFallback: () => {
+      notices++;
+    },
+  });
+  await sink.start(SINK_FORMAT);
+  await assert.rejects(() => sink.write(Buffer.from([1])), /ffplay gone/);
+  assert.equal(notices, 1);
+});
+
+test("withSessionFallback stop during pending fallback start leaves mic stopped", async () => {
+  const primary = controllableSource();
+  let releaseFallbackStart!: () => void;
+  let fallbackPcm: (chunk: Buffer) => void = () => {};
+  let fallbackStops = 0;
+  const deferredFallback: AudioSource = {
+    start: async (pcm): Promise<void> => {
+      fallbackPcm = pcm;
+      await new Promise<void>((resolve) => {
+        releaseFallbackStart = resolve;
+      });
+    },
+    stop: async (): Promise<void> => {
+      fallbackStops++;
+    },
+  };
+  let notices = 0;
+  const src = withSessionFallback({
+    primary: primary.source,
+    createFallback: () => deferredFallback,
+    shouldFallback: (err) => (err as Error).message.includes("device"),
+    onFallback: () => {
+      notices++;
+    },
+  });
+  const chunks: Buffer[] = [];
+  const seen: Error[] = [];
+  await src.start(
+    (c) => chunks.push(c),
+    (e) => seen.push(e),
+  );
+  primary.onError(new Error("helper device gone"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notices, 1);
+  const stopping = src.stop();
+  releaseFallbackStart();
+  await stopping;
+  // Fallback start completed after stop: it must have been stopped immediately.
+  assert.equal(fallbackStops, 1);
+  // PCM arriving late from the orphaned fallback must never reach the session.
+  fallbackPcm(Buffer.from([9, 9]));
+  assert.equal(chunks.length, 0);
+  assert.equal(seen.length, 0);
+});
+
+test("withSessionFallback restart after stop works", async () => {
+  const primary = controllableSource();
+  const fallback = controllableSource();
+  const src = withSessionFallback({
+    primary: primary.source,
+    createFallback: () => fallback.source,
+    shouldFallback: (err) => (err as Error).message.includes("device"),
+    onFallback: () => {},
+  });
+  const chunks: Buffer[] = [];
+  await src.start(
+    (c) => chunks.push(c),
+    () => {},
+  );
+  primary.onError(new Error("helper device gone"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fallback.starts(), 1);
+  await src.stop();
+  assert.equal(fallback.stops(), 1);
+  const chunks2: Buffer[] = [];
+  await src.start(
+    (c) => chunks2.push(c),
+    () => {},
+  );
+  fallback.onPcm(Buffer.from([7, 8]));
+  assert.equal(chunks2.length, 1);
+  await src.stop();
 });

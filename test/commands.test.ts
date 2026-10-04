@@ -8,6 +8,7 @@ import { LEARN, type SpeakerProfile } from "../src/speaker.ts";
 import {
   MISSING_INWORLD_KEY_MESSAGE,
   MISSING_KEY_MESSAGE,
+  createSpeakerStore,
   getVoiceCompletions,
   handleVoiceCommand,
   parseVoiceArgs,
@@ -579,7 +580,12 @@ describe("isolation and speaker commands", () => {
     const bag = makeEnv();
     makeSpokedEnv(bag);
     await handleVoiceCommand("speaker", ctxFor(bag.notified), bag.env);
-    assert.ok(bag.notified.some((n) => /speaker: normal, learning on, enrolled 2026-01-02.*learned 0\/64/.test(n.message)));
+    assert.ok(
+      bag.notified.some((n) =>
+        new RegExp(`speaker: normal, learning on, enrolled 2026-01-02.*learned 0/${LEARN.maxLearned}`).test(n.message),
+      ),
+      JSON.stringify(bag.notified),
+    );
     await handleVoiceCommand("speaker high", ctxFor(bag.notified), bag.env);
     assert.equal(bag.prefs.speakerCheck, "high");
     await handleVoiceCommand("speaker forget", ctxFor(bag.notified), bag.env);
@@ -842,5 +848,162 @@ describe("speaker learning commands", () => {
     assert.ok(text.includes("that-was-me"), text);
     assert.ok(text.includes("reset-learning"), text);
     assert.ok(text.includes("learn on|off"), text);
+  });
+});
+
+describe("speaker profile store (authoritative in-memory profile)", () => {
+  function fakeProfile(tag: string): SpeakerProfile {
+    const v = Array.from({ length: 4 }, (_, i) => i + tag.length);
+    return {
+      version: 1,
+      dim: 4,
+      centroid: v,
+      enrollScores: [0.9],
+      suggestedThreshold: 0.7,
+      enrolledAt: "2026-01-02",
+      model: "test-model",
+    };
+  }
+
+  it("a learning flush persists when nothing intervened", async () => {
+    const saved: SpeakerProfile[] = [];
+    const store = createSpeakerStore({
+      save: async (p) => {
+        saved.push(p);
+      },
+      remove: async () => {},
+    });
+    const dirty = fakeProfile("dirty");
+    store.setCurrent(dirty);
+    assert.equal(await store.flushDirty(dirty), true);
+    assert.equal(saved.length, 1);
+    assert.equal(saved[0], dirty);
+  });
+
+  it("forget discards a pending learning flush so no file comes back", async () => {
+    const saved: SpeakerProfile[] = [];
+    let removed = 0;
+    const store = createSpeakerStore({
+      save: async (p) => {
+        saved.push(p);
+      },
+      remove: async () => {
+        removed++;
+      },
+    });
+    const dirty = fakeProfile("dirty");
+    store.setCurrent(dirty);
+    await store.clearAndDelete();
+    assert.equal(store.get(), undefined);
+    assert.equal(removed, 1);
+    assert.equal(await store.flushDirty(dirty), false);
+    assert.equal(saved.length, 0);
+  });
+
+  it("that-was-me and reset-learning win over an older pending flush", async () => {
+    const saved: SpeakerProfile[] = [];
+    const store = createSpeakerStore({
+      save: async (p) => {
+        saved.push(p);
+      },
+      remove: async () => {},
+    });
+    const stale = fakeProfile("stale");
+    store.setCurrent(stale);
+    const corrected = fakeProfile("corrected");
+    await store.saveAndSet(corrected);
+    assert.equal(store.get(), corrected);
+    assert.equal(await store.flushDirty(stale), false);
+    assert.deepEqual(saved, [corrected]);
+  });
+
+  it("a save in flight when forget runs does not resurrect the file (deferred save + forget)", async () => {
+    // Fake disk with file + temp staging, mimicking atomic write semantics.
+    const files = new Map<string, SpeakerProfile>();
+    const temps = new Map<string, SpeakerProfile>();
+    let releaseSave!: () => void;
+    const saveStarted = new Promise<void>((resolve) => {
+      releaseSave = resolve;
+    });
+    let saveEntered = false;
+    const store = createSpeakerStore({
+      save: async (p) => {
+        temps.set("profile", p);
+        saveEntered = true;
+        // Stall mid-save so the delete below lands while the save is in flight.
+        await saveStarted;
+        files.set("profile", p);
+        temps.delete("profile");
+      },
+      remove: async () => {
+        files.delete("profile");
+        temps.delete("profile.tmp");
+        temps.delete("profile");
+      },
+    });
+    const dirty = fakeProfile("dirty");
+    store.setCurrent(dirty);
+    const flushPromise = store.flushDirty(dirty);
+    // Wait until the save is stalled mid-flight.
+    while (!saveEntered) await new Promise((r) => setImmediate(r));
+    const clearPromise = store.clearAndDelete();
+    releaseSave();
+    await flushPromise;
+    await clearPromise;
+    // Let any trailing delete settle.
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(files.has("profile"), false, "resurrected file");
+    assert.equal(temps.size, 0, "temp file left behind");
+    assert.equal(store.get(), undefined);
+  });
+
+  it("a save after forget is a no-op", async () => {
+    let saves = 0;
+    const store = createSpeakerStore({
+      save: async () => {
+        saves++;
+      },
+      remove: async () => {},
+    });
+    const dirty = fakeProfile("dirty");
+    store.setCurrent(dirty);
+    await store.clearAndDelete();
+    assert.equal(await store.flushDirty(dirty), false);
+    assert.equal(saves, 0);
+  });
+
+  it("reset-learning/that-was-me ordering lands the latest profile", async () => {
+    const saved: SpeakerProfile[] = [];
+    const files = new Map<string, SpeakerProfile>();
+    const store = createSpeakerStore({
+      save: async (p) => {
+        saved.push(p);
+        files.set("profile", p);
+      },
+      remove: async () => {
+        files.delete("profile");
+      },
+    });
+    const stale = fakeProfile("stale");
+    store.setCurrent(stale);
+    const latest = fakeProfile("latest-correction");
+    await store.saveAndSet(latest);
+    assert.equal(await store.flushDirty(stale), false);
+    assert.deepEqual(saved, [latest]);
+    assert.equal(files.get("profile"), latest);
+    assert.equal(store.get(), latest);
+  });
+
+  it("forget clears the in-memory profile before deleting the file", async () => {
+    const order: string[] = [];
+    const store = createSpeakerStore({
+      save: async () => {},
+      remove: async () => {
+        order.push(store.get() === undefined ? "cleared-first" : "still-set");
+      },
+    });
+    store.setCurrent(fakeProfile("x"));
+    await store.clearAndDelete();
+    assert.deepEqual(order, ["cleared-first"]);
   });
 });
