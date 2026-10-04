@@ -100,7 +100,22 @@ Last verified in this session (measured): typecheck exit 0; full tests 488/488; 
   a simultaneous helper (VP off) vs ffmpeg alignment-drift test would discriminate. It affects the production raw path
   (isolation off / fallback). Note: path C (the helper's own bypassed stream, 100% delivery) scored 0.79 vs D 0.89.
 
-## Next steps
+## Research wave 2026-10-05 (owner concluded embedding matching is not robust enough)
+
+Workflow `d1d262b8-430b-483d-a8eb-f1617f40efd5`, 5 researcher reports in subagent-artifacts
+(61fb3b80 sv-sota, 310abaa6 production, cfbe5c22 device-directed, 24bb8778 tse-pvad, c23b59bf macos-hw).
+- Consensus: shipping assistants do not hard-gate on a text-independent embedding threshold. Apple: text-dependent check on the wake
+  phrase, then later passes plus directed-speech detection. Google/Alexa: speaker ID gates personal data, not wake-up.
+- Parent spot-checks: FFmpeg Trac #11398 is real (open: avfoundation audio randomly missing samples; matches our ~12% shortfall).
+  The openWakeWord custom-verifier doc exists (its >95% claim is unverified). Picovoice Eagle does support Node and macOS arm64 but needs an
+  AccessKey account (free-tier limits unverified). Researcher claim that MediaRemote now-playing works is WRONG: blocked for third-party
+  apps since macOS 15.4 (works only via the perl-adapter workaround).
+- Researchers assumed we gate at 1.2 s. We do not: the owner's 5 `/voice test speaker` runs had 5.4-5.7 s of speech and still spread 0.48-0.72
+  (processed path). Whole-utterance scoring alone did not fix it. The raw path's accept/reject rates have never been measured.
+- Decision pending with owner: demote speaker ID to an opt-in soft signal and add deterministic gates, versus one time-boxed
+  clean-audio retest with real impostor audio.
+
+## Next steps (superseded pending the decision above)
 
 1. Owner: restart Pi, run `/voice setup` to rebuild the helper. Before the diag, run `/voice off` in EVERY Pi session.
 2. Run `node research/speaker-diag/diag.mjs` in Terminal (defaults E,F,D) with the same phrases per path; paste `COPY-PASTE SUMMARY`. Audio remains in memory only. This determines whether bypass during capture (F) approaches plain ffmpeg (D); do not change production speaker capture before this evidence.
