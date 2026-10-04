@@ -37,9 +37,39 @@ From the repo root (`/Users/rhinesharar/pi-voice`):
 ```sh
 node research/speaker-diag/diag.mjs               # interactive, needs the owner + mic (paths E,F,D)
 node research/speaker-diag/diag.mjs --paths E,F,D  # same; pick any subset of A,B,C,D,E,F
+node research/speaker-diag/diag.mjs --paths E,F,D --force  # skip the foreign-helper preflight block
 node research/speaker-diag/diag.mjs --self-test    # no human, no microphone
 node research/speaker-diag/diag.mjs --help
 ```
+
+## Validity guards (an invalid run cannot look valid)
+
+A prior run recorded every D/E/F clip at −71 to −77 dBFS RMS with VAD
+finding 0 ms of speech in 3 of 4 F clips (earlier same-path speech: about
+−33 dBFS; ambient ffmpeg-alone: −57.1 dBFS, zero 0.77%). The concurrency
+probe (`concurrent/results.md`) shows why: while a voice-io helper runs
+voice processing, other apps' raw capture is attenuated 15–26 dB and gated
+(zero-sample fraction 0.6% → 11–20%), and ffmpeg delivery runs at ~88–90%
+of nominal rate while the helper delivers ~101%. A Pi session's VP helper
+running during the diag explains all three signatures at once.
+
+- **Preflight**: before recording, the tool runs `pgrep -fl` (via
+  child_process) and matches the helper binary name pattern
+  `voice-io-<hash>`, excluding its own pid/children and the pgrep
+  self-match. Any foreign helper pids are printed with an explanation
+  (Apple voice processing in another process turns down and gates every
+  app's mic — run `/voice off` in every Pi session) and the tool exits
+  non-zero unless `--force` is given. Other ffmpeg AVFoundation captures
+  are printed (they hold the mic) but do not block.
+- **Per-clip validity**: a clip is INVALID when speech RMS < **−50 dBFS**
+  (well below quiet-but-valid speech at ~−33 dBFS, well above the
+  −71 dBFS contamination floor) or VAD speech < **1500 ms**. The reason
+  prints inline; invalid clips are excluded from every matrix, cross-path
+  value, and summary; each path reports "n valid/total". Below 3 valid
+  clips the path prints `INSUFFICIENT VALID CLIPS` and gets no verdict.
+- **Verdict**: only paths with ≥ 3 valid clips are compared; otherwise
+  the tool prints `NO VERDICT` with the reason (also in the copy-paste
+  summary).
 
 Interactive flow: for each selected path in turn, each of the 4 printed
 phrases is recorded (~5 s; owner presses Enter to start, recording stops on

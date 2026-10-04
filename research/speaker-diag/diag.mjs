@@ -44,6 +44,17 @@ import { createVoiceIo, ensureVoiceIoHelper } from "../../src/voice-io.ts";
 const SR = 16000;
 const BYTES_PER_SEC = SR * 2;
 const MAX_SEC = 6;
+
+// Clip-validity floors, set from measured evidence (see README "Validity
+// guards"): healthy speech is about -33 to -10 dBFS RMS, while a run
+// contaminated by another process's Apple voice processing measured -71 to
+// -77 dBFS RMS with VAD finding 0 ms of speech in 3 of 4 clips. -50 dBFS
+// sits well below any plausible quiet-but-valid speech and well above the
+// contaminated range; 1500 ms is half the expected >= 3 s of VAD speech
+// per phrase. A path needs >= 3 of 4 valid clips for any verdict.
+const VALID_RMS_FLOOR_DB = -50;
+const MIN_VAD_SPEECH_MS = 1500;
+const MIN_VALID_CLIPS = 3;
 const FIRST_SPEECH_SEC = 1.2;
 const GATE_WINDOW_SEC = 2.5;
 const ENROLL_WINDOW_SEC = 4;
@@ -277,6 +288,80 @@ export function isSampleRateSuspicious(pct) {
   return pct < 95 || pct > 105;
 }
 
+export function parsePgrepVoiceIo(output, ownPids = new Set()) {
+  // Parses `pgrep -fl` output ("<pid> <full command>" per line) into foreign
+  // voice-io helper matches vs informational ffmpeg captures. ownPids holds
+  // pids started by this tool (own process + own helper children) that must
+  // not trip the guard. The pgrep process itself matches its own pattern, so
+  // lines containing "pgrep" are ignored.
+  const helpers = [];
+  const ffmpeg = [];
+  for (const raw of String(output ?? "").split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^(\d+)\s+(.*)$/);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    const cmd = m[2];
+    if (!Number.isFinite(pid)) continue;
+    if (ownPids.has(pid)) continue;
+    if (/pgrep/i.test(cmd)) continue;
+    if (/voice-io-[0-9a-f]{6,}/i.test(cmd)) {
+      helpers.push({ pid, cmd: cmd.trim() });
+    } else if (/ffmpeg/i.test(cmd) && (/avfoundation/i.test(cmd) || /:default/.test(cmd))) {
+      ffmpeg.push({ pid, cmd: cmd.trim() });
+    }
+  }
+  return { helpers, ffmpeg };
+}
+
+async function runPreflight({ force = false, ownPids = new Set() } = {}) {
+  // Detects foreign voice-io helper processes before recording. Apple voice
+  // processing engaged by ANY process turns down and gates every app's mic
+  // feed system-wide (concurrency probe: 15-26 dB attenuation + zero-sample
+  // gating on concurrent raw capture), so a foreign helper invalidates the
+  // run. Returns true when recording may proceed.
+  let output = "";
+  try {
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const execFileAsync = promisify(execFile);
+    const collect = async (pattern) => {
+      try {
+        const r = await execFileAsync("pgrep", ["-fl", pattern]);
+        return r.stdout ?? "";
+      } catch (err) {
+        // pgrep exits 1 when nothing matches; that is the clean case.
+        if (err?.code === 1) return String(err?.stdout ?? "");
+        throw err;
+      }
+    };
+    output = [await collect("voice-io-"), await collect("ffmpeg")].filter(Boolean).join("\n");
+  } catch (err) {
+    console.log(`preflight: could not run pgrep (${err?.message ?? err}); continuing without helper check.`);
+    return true;
+  }
+  const allOwn = new Set([...ownPids, process.pid]);
+  const { helpers, ffmpeg } = parsePgrepVoiceIo(output, allOwn);
+  if (ffmpeg.length > 0) {
+    console.log("preflight: other ffmpeg AVFoundation capture processes (mic may be held):");
+    for (const f of ffmpeg) console.log(`  pid ${f.pid}: ${f.cmd}`);
+  }
+  if (helpers.length === 0) {
+    console.log("preflight: no foreign voice-io helper processes found.");
+    return true;
+  }
+  console.log("preflight: FOREIGN voice-io helper process(es) detected:");
+  for (const h of helpers) console.log(`  pid ${h.pid}: ${h.cmd}`);
+  console.log("Apple voice processing in another process turns down and gates every app's mic feed,");
+  console.log("so this run would be invalid. Run /voice off in every Pi session, then retry.");
+  if (force) {
+    console.log("preflight: --force given; proceeding despite foreign helper (results may be INVALID).");
+    return true;
+  }
+  return false;
+}
+
 function fmtCos(v) {
   return Number.isNaN(v) ? "  n/a" : v.toFixed(2).padStart(5);
 }
@@ -303,12 +388,24 @@ function dbStr(v) {
   return Number.isFinite(v) ? `${v.toFixed(1)}dB` : "-inf";
 }
 
+export function clipValidity({ rmsDb = -Infinity, vadSpeechMs = 0 } = {}) {
+  const reasons = [];
+  if (!(rmsDb > VALID_RMS_FLOOR_DB)) reasons.push(`rms ${dbStr(rmsDb)}FS < floor ${VALID_RMS_FLOOR_DB} dBFS`);
+  if (!(vadSpeechMs >= MIN_VAD_SPEECH_MS)) reasons.push(`vad ${Math.round(vadSpeechMs)} ms < ${MIN_VAD_SPEECH_MS} ms`);
+  return { valid: reasons.length === 0, reasons };
+}
+
+function validResults(results) {
+  return (results ?? []).filter((r) => !r.invalid);
+}
+
 export async function analyzePath(name, clips, embedder) {
   const profile = await loadSpeakerProfile();
   const results = [];
   for (const clip of clips) {
     const { metrics, speechPcm } = measureClip(clip.pcm, clip.wallMs);
-    const r = { phrase: clip.phrase, metrics };
+    const { valid, reasons } = clipValidity({ rmsDb: metrics.rmsDb, vadSpeechMs: metrics.vadSpeechMs });
+    const r = { phrase: clip.phrase, metrics, invalid: !valid, invalidReasons: reasons };
     const embFull = tryEmbed(embedder, clip.pcm);
     const embSpeech = tryEmbed(embedder, speechPcm);
     const embHead = tryEmbed(embedder, firstSpeechWindow(speechPcm));
@@ -335,16 +432,24 @@ export async function analyzePath(name, clips, embedder) {
       ` phrase ${r.phrase}: bytes=${m.bytes} (=${m.audioSec.toFixed(2)}s @16k) vs wall=${m.wallSec.toFixed(2)}s (${sanity.toFixed(0)}%)${flag}`,
     );
     const gateScores = `score=${r.scoreFull !== undefined ? r.scoreFull.toFixed(3) : "n/a"} score-2.5s=${r.scoreHead25 !== undefined ? r.scoreHead25.toFixed(3) : "n/a"} score-4s=${r.scoreHead40 !== undefined ? r.scoreHead40.toFixed(3) : "n/a"}`;
+    const validityTag = r.invalid ? ` INVALID (${r.invalidReasons.join("; ")})` : "";
     console.log(
-      `   rms=${dbStr(m.rmsDb)} peak=${dbStr(m.peakDb)} clip=${m.clipPct.toFixed(2)}% dc=${m.dcOffset.toFixed(4)} vad=${Math.round(m.vadSpeechMs)}ms${m.vadFallback ? " (energy fallback)" : ""} ${gateScores}`,
+      `   rms=${dbStr(m.rmsDb)} peak=${dbStr(m.peakDb)} clip=${m.clipPct.toFixed(2)}% dc=${m.dcOffset.toFixed(4)} vad=${Math.round(m.vadSpeechMs)}ms${m.vadFallback ? " (energy fallback)" : ""} ${gateScores}${validityTag}`,
     );
   }
-  const labels = results.map((r) => `p${r.phrase}`);
-  printMatrix("full-clip cosines:", results.map((r) => r.embFull), labels);
-  printMatrix("speech-only cosines:", results.map((r) => r.embSpeech), labels);
-  printMatrix("first-1.2s cosines:", results.map((r) => r.embHead), labels);
-  printMatrix("first-2.5s cosines:", results.map((r) => r.embHead25), labels);
-  printMatrix("first-4s cosines:", results.map((r) => r.embHead40), labels);
+  const nValid = validResults(results).length;
+  console.log(`  ${nValid} valid/${results.length} clips on path ${name}.`);
+  if (nValid < MIN_VALID_CLIPS) {
+    console.log(`  INSUFFICIENT VALID CLIPS on path ${name}: no verdict for this path.`);
+    return { results, profileThreshold: profile?.suggestedThreshold };
+  }
+  const vr = validResults(results);
+  const labels = vr.map((r) => `p${r.phrase}`);
+  printMatrix("full-clip cosines (valid clips only):", vr.map((r) => r.embFull), labels);
+  printMatrix("speech-only cosines (valid clips only):", vr.map((r) => r.embSpeech), labels);
+  printMatrix("first-1.2s cosines (valid clips only):", vr.map((r) => r.embHead), labels);
+  printMatrix("first-2.5s cosines (valid clips only):", vr.map((r) => r.embHead25), labels);
+  printMatrix("first-4s cosines (valid clips only):", vr.map((r) => r.embHead40), labels);
   return { results, profileThreshold: profile?.suggestedThreshold };
 }
 
@@ -618,7 +723,11 @@ export function parsePathsArg(argv) {
   return [...new Set(valid)];
 }
 
-async function interactive(selectedKeys) {
+async function interactive(selectedKeys, { force = false } = {}) {
+  if (!(await runPreflight({ force }))) {
+    console.error("Aborted: foreign voice-io helper detected (use --force to override).");
+    return 1;
+  }
   const embedder = loadEmbedder();
   if (!embedder) {
     console.error("Speaker model not cached; cannot compute embeddings. Run /voice setup first.");
@@ -664,7 +773,7 @@ function crossPathSpeechValues(byPath, kx, ky) {
   for (let p = 1; p <= PHRASES.length; p++) {
     const ra = x.find((r) => r.phrase === p);
     const rb = y.find((r) => r.phrase === p);
-    if (ra?.embSpeech && rb?.embSpeech) vals.push(cosineSimilarity(ra.embSpeech, rb.embSpeech));
+    if (ra?.embSpeech && rb?.embSpeech && !ra.invalid && !rb.invalid) vals.push(cosineSimilarity(ra.embSpeech, rb.embSpeech));
   }
   return vals;
 }
@@ -680,7 +789,8 @@ function printCrossPath(byPath) {
       for (let j = i + 1; j < keys.length; j++) {
         const ra = byPath.get(keys[i]).find((r) => r.phrase === p);
         const rb = byPath.get(keys[j]).find((r) => r.phrase === p);
-        const v = ra?.embSpeech && rb?.embSpeech ? cosineSimilarity(ra.embSpeech, rb.embSpeech).toFixed(2) : "n/a";
+        const bothValid = ra && rb && !ra.invalid && !rb.invalid && ra.embSpeech && rb.embSpeech;
+        const v = bothValid ? cosineSimilarity(ra.embSpeech, rb.embSpeech).toFixed(2) : "n/a";
         cells.push(`${keys[i]}-${keys[j]}=${v}`);
       }
     }
@@ -701,13 +811,19 @@ function printSummary(byPath) {
   let bestKey = "";
   let bestMean = -Infinity;
   for (const [key, results] of byPath) {
-    const st = pairwiseStats(results.map((r) => r.embSpeech));
-    const scored = results.map((r) => r.scoreSpeech).filter((s) => s !== undefined);
+    const vr = validResults(results);
+    const validTag = `${vr.length} valid/${results.length}`;
+    if (vr.length < MIN_VALID_CLIPS) {
+      console.log(`${key.padEnd(5)} INSUFFICIENT VALID CLIPS (${validTag}): no verdict for this path.`);
+      continue;
+    }
+    const st = pairwiseStats(vr.map((r) => r.embSpeech));
+    const scored = vr.map((r) => r.scoreSpeech).filter((s) => s !== undefined);
     const meanScore = scored.length > 0 ? scored.reduce((a, b) => a + b, 0) / scored.length : NaN;
-    const finiteRms = results.map((r) => r.metrics.rmsDb).filter((v) => Number.isFinite(v));
+    const finiteRms = vr.map((r) => r.metrics.rmsDb).filter((v) => Number.isFinite(v));
     const meanRms = finiteRms.length > 0 ? finiteRms.reduce((a, b) => a + b, 0) / finiteRms.length : NaN;
     console.log(
-      `${key.padEnd(5)} ${fmtCos(st.mean).trim().padStart(10)} ${fmtCos(st.min).trim().padStart(10)} ${(Number.isNaN(meanScore) ? "n/a" : meanScore.toFixed(3)).padStart(10)} ${(Number.isNaN(meanRms) ? "-inf" : meanRms.toFixed(1) + "dB").padStart(9)}`,
+      `${key.padEnd(5)} ${fmtCos(st.mean).trim().padStart(10)} ${fmtCos(st.min).trim().padStart(10)} ${(Number.isNaN(meanScore) ? "n/a" : meanScore.toFixed(3)).padStart(10)} ${(Number.isNaN(meanRms) ? "-inf" : meanRms.toFixed(1) + "dB").padStart(9)} (${validTag})`,
     );
     if (!Number.isNaN(st.mean) && st.mean > bestMean) {
       bestMean = st.mean;
@@ -716,7 +832,7 @@ function printSummary(byPath) {
   }
   let verdict;
   if (!bestKey) {
-    verdict = "VERDICT: no usable embeddings on any path — check capture levels first.";
+    verdict = `NO VERDICT: no path has >= ${MIN_VALID_CLIPS} valid clips (check INSUFFICIENT VALID CLIPS above; the run may be contaminated).`;
   } else {
     verdict = `VERDICT: path ${bestKey} is the most self-consistent (highest mean speech-only within-path cosine). Prefer it for enrollment/verification.`;
   }
@@ -730,13 +846,24 @@ function printCopyPasteBlock(byPath) {
   const keys = [...byPath.keys()];
   const lines = [];
   lines.push("speaker-diag summary");
+  let bestKey = "";
+  let bestMean = -Infinity;
   for (const [key, results] of byPath) {
-    const st = pairwiseStats(results.map((r) => r.embSpeech));
+    const vr = validResults(results);
+    if (vr.length < MIN_VALID_CLIPS) {
+      lines.push(`within-speech ${key}: INSUFFICIENT VALID CLIPS (${vr.length} valid/${results.length} total): no verdict for this path`);
+      continue;
+    }
+    const st = pairwiseStats(vr.map((r) => r.embSpeech));
     const mean = Number.isNaN(st.mean) ? "n/a" : st.mean.toFixed(3);
     const min = Number.isNaN(st.min) ? "n/a" : st.min.toFixed(3);
-    const finiteRms = results.map((r) => r.metrics.rmsDb).filter((v) => Number.isFinite(v));
+    const finiteRms = vr.map((r) => r.metrics.rmsDb).filter((v) => Number.isFinite(v));
     const meanRms = finiteRms.length > 0 ? (finiteRms.reduce((a, b) => a + b, 0) / finiteRms.length).toFixed(1) + "dB" : "n/a";
-    lines.push(`within-speech ${key}: mean=${mean} min=${min} n=${st.n} mean-rms=${meanRms}`);
+    lines.push(`within-speech ${key}: mean=${mean} min=${min} n=${st.n} mean-rms=${meanRms} (${vr.length} valid/${results.length} total)`);
+    if (!Number.isNaN(st.mean) && st.mean > bestMean) {
+      bestMean = st.mean;
+      bestKey = key;
+    }
   }
   for (let i = 0; i < keys.length; i++) {
     for (let j = i + 1; j < keys.length; j++) {
@@ -746,6 +873,8 @@ function printCopyPasteBlock(byPath) {
       lines.push(`cross-speech ${keys[i]}-${keys[j]}: per-phrase=[${per}] mean=${mean}`);
     }
   }
+  if (bestKey) lines.push(`verdict: most self-consistent path = ${bestKey} (mean ${bestMean.toFixed(3)})`);
+  else lines.push(`NO VERDICT: no path has >= ${MIN_VALID_CLIPS} valid clips`);
   console.log("\n===== COPY-PASTE SUMMARY BEGIN =====");
   for (const line of lines) console.log(line);
   console.log("===== COPY-PASTE SUMMARY END =====");
@@ -843,6 +972,62 @@ async function selfTest() {
     console.error("SELF-TEST FAIL: pipeline produced no embedding or silence on synthetic speech.");
     return 1;
   }
+  const nSynthValid = validResults(results).length;
+  console.log(`self-test validity: synthetic clips valid=${nSynthValid}/${results.length} (need >= ${MIN_VALID_CLIPS})`);
+  if (nSynthValid < MIN_VALID_CLIPS) {
+    console.error("SELF-TEST FAIL: healthy synthetic speech marked INVALID.");
+    return 1;
+  }
+  const quietBuf = Buffer.from(clips[0].pcm);
+  for (let i = 0; i + 1 < quietBuf.length; i += 2) {
+    quietBuf.writeInt16LE(Math.round(quietBuf.readInt16LE(i) * 0.01), i);
+  }
+  const quiet = measureClip(quietBuf, clips[0].wallMs);
+  const quietCheck = clipValidity({ rmsDb: quiet.metrics.rmsDb, vadSpeechMs: quiet.metrics.vadSpeechMs });
+  console.log(`self-test quiet clip (-40 dB): rms=${dbStr(quiet.metrics.rmsDb)} vad=${Math.round(quiet.metrics.vadSpeechMs)}ms valid=${quietCheck.valid}`);
+  if (quietCheck.valid) {
+    console.error("SELF-TEST FAIL: 40 dB-attenuated clip not marked INVALID.");
+    return 1;
+  }
+  const parserChecks = [
+    {
+      name: "helper detected",
+      out: "1234 /Users/x/Library/Caches/voice-io/bin/voice-io-abc123def456 --mic\n5678 /usr/sbin/systemstats\n",
+      own: [],
+      wantHelpers: 1,
+      wantFfmpeg: 0,
+    },
+    {
+      name: "clean machine",
+      out: "5678 /usr/sbin/systemstats\n",
+      own: [],
+      wantHelpers: 0,
+      wantFfmpeg: 0,
+    },
+    {
+      name: "own child excluded",
+      out: "9999 /Users/x/Library/Caches/voice-io/bin/voice-io-abc123def456 --mic\n",
+      own: [9999],
+      wantHelpers: 0,
+      wantFfmpeg: 0,
+    },
+    {
+      name: "pgrep self-match excluded, ffmpeg reported",
+      out: "1000 pgrep -fl voice-io-\n2000 ffmpeg -f avfoundation -i :default -ac 1 -ar 16000 -f s16le pipe:1\n",
+      own: [],
+      wantHelpers: 0,
+      wantFfmpeg: 1,
+    },
+  ];
+  for (const { name, out, own, wantHelpers, wantFfmpeg } of parserChecks) {
+    const parsed = parsePgrepVoiceIo(out, new Set(own));
+    const ok = parsed.helpers.length === wantHelpers && parsed.ffmpeg.length === wantFfmpeg;
+    console.log(`self-test preflight parser [${name}]: helpers=${parsed.helpers.length} ffmpeg=${parsed.ffmpeg.length} ${ok ? "ok" : "MISMATCH"}`);
+    if (!ok) {
+      console.error(`SELF-TEST FAIL: preflight parser [${name}] expected ${wantHelpers} helpers/${wantFfmpeg} ffmpeg.`);
+      return 1;
+    }
+  }
   printSummary(byPath);
   printCopyPasteBlock(byPath);
   console.log("SELF-TEST PASS");
@@ -856,6 +1041,7 @@ if (args.includes("--help") || args.includes("-h")) {
   console.log("Usage:");
   console.log("  node research/speaker-diag/diag.mjs [--paths E,F,D] interactive (needs the owner + microphone)");
   console.log("  node research/speaker-diag/diag.mjs --self-test non-interactive pipeline check via `say`");
+  console.log("  --force: skip the foreign voice-io helper preflight block (results may be INVALID)");
   console.log("Paths: A=helper VP on, AGC off; B=helper VP on+AGC on; C=helper VP on+bypass (raw mic);");
   console.log("       D=ffmpeg raw; E=ffmpeg raw while helper VP-on runs (planned prod setup);");
   console.log("       F=ffmpeg raw while bypass helper runs (restart w/ --bypass). Default: E,F,D.");
@@ -863,7 +1049,8 @@ if (args.includes("--help") || args.includes("-h")) {
 }
 
 try {
-  const code = args.includes("--self-test") ? await selfTest() : await interactive(parsePathsArg(args));
+  const force = args.includes("--force");
+  const code = args.includes("--self-test") ? await selfTest() : await interactive(parsePathsArg(args), { force });
   process.exit(code);
 } catch (err) {
   console.error(`Fatal: ${err.message}`);
