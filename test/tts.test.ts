@@ -1,7 +1,9 @@
 import { strict as assert } from "node:assert";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, it } from "node:test";
 import type { AudioSink, VoiceFailure } from "../src/contracts.ts";
-import { DEFAULT_TTS_MODEL, startSpeech } from "../src/tts.ts";
+import { DEFAULT_TTS_MODEL, createWsTtsSocket, startSpeech } from "../src/tts.ts";
 import type { TtsSocket } from "../src/tts.ts";
 
 type Handler = (arg: unknown) => void;
@@ -219,5 +221,126 @@ describe("tts startSpeech", () => {
     assert.equal(failures.length, 1);
     assert.ok(failures[0].message.includes("/voice model eleven_flash_v2_5"));
     assert.ok(!JSON.stringify(failures[0]).includes("secret-key"));
+  });
+
+  it("queues text pushed before open and sends it after init, in order", async () => {
+    // ws throws on send() while CONNECTING; mirror that.
+    const socket = new FakeSocket();
+    let open = false;
+    const realSend = socket.send.bind(socket);
+    socket.send = (data: string): void => {
+      if (!open) throw new Error("WebSocket is not open: readyState 0 (CONNECTING)");
+      realSend(data);
+    };
+    const failures: VoiceFailure[] = [];
+    const speech = startSpeech(
+      { key: "k", voiceId: "v", onDone: () => undefined, onFailure: (f) => failures.push(f) },
+      { socketFactory: () => socket as unknown as TtsSocket, sinkFactory: () => makeSink() },
+    );
+    speech.push("Hello there.");
+    speech.finish();
+    open = true;
+    socket.emit("open", undefined);
+    await tick();
+    assert.deepEqual(failures, []);
+    const texts = socket.sent.map((raw) => (JSON.parse(raw) as { text: string }).text);
+    assert.deepEqual(texts, [" ", "Hello there. ", ""]);
+  });
+
+  it("defaults to a model the stream-input endpoint accepts", () => {
+    assert.equal(DEFAULT_TTS_MODEL, "eleven_flash_v2_5");
+  });
+
+  it("logs connect, open, first audio, final, and done", async () => {
+    const socket = new FakeSocket();
+    const logs: { event: string; data?: Record<string, unknown> }[] = [];
+    let done = 0;
+    startSpeech(
+      { key: "secret-key", voiceId: "voice123", onDone: () => (done += 1), onFailure: () => undefined },
+      {
+        socketFactory: () => socket as unknown as TtsSocket,
+        sinkFactory: () => makeSink(),
+        log: (event, data) => logs.push({ event, data }),
+      },
+    );
+    socket.emit("open", undefined);
+    socket.emit("message", JSON.stringify({ audio: Buffer.from([1, 2, 3, 4]).toString("base64") }));
+    socket.emit("message", JSON.stringify({ audio: Buffer.from([5, 6]).toString("base64") }));
+    socket.emit("message", JSON.stringify({ audio: null, isFinal: true }));
+    await tick();
+    assert.equal(done, 1);
+    assert.deepEqual(
+      logs.map((l) => l.event),
+      ["tts-ws-connect", "tts-ws-open", "tts-ws-first-audio", "tts-ws-final", "tts-ws-done"],
+    );
+    assert.equal(logs[0].data?.["modelId"], DEFAULT_TTS_MODEL);
+    assert.deepEqual(
+      { chunks: logs[3].data?.["chunks"], bytes: logs[3].data?.["bytes"] },
+      { chunks: 2, bytes: 6 },
+    );
+    assert.ok(!JSON.stringify(logs).includes("secret-key"));
+  });
+
+  it("surfaces an HTTP upgrade rejection with the server's reason and a model hint", async () => {
+    const body = JSON.stringify({
+      detail: {
+        type: "validation_error",
+        code: "unsupported_model",
+        message: "Model 'eleven_v4_turbo' is not supported on the text-to-speech websocket endpoint.",
+        request_id: "4011429402deadbeef",
+      },
+    });
+    const server = createServer();
+    server.on("upgrade", (_req, sock) => {
+      sock.end(
+        `HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+      );
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const logs: { event: string; data?: Record<string, unknown> }[] = [];
+    try {
+      const failure = await new Promise<VoiceFailure>((resolve, reject) => {
+        startSpeech(
+          { key: "secret-key", voiceId: "voice123", modelId: "eleven_v4_turbo", onDone: () => reject(new Error("done")), onFailure: resolve },
+          {
+            socketFactory: (_url, init) => createWsTtsSocket(`ws://127.0.0.1:${port}/`, init),
+            sinkFactory: () => makeSink(),
+            log: (event, data) => logs.push({ event, data }),
+          },
+        );
+      });
+      // request_id digits must not be mistaken for a 401/429/402 status.
+      assert.equal(failure.code, "protocol");
+      assert.equal(failure.retryable, false);
+      assert.ok(failure.message.includes("not supported on the text-to-speech websocket"), failure.message);
+      assert.ok(failure.message.includes("/voice model eleven_flash_v2_5"), failure.message);
+      assert.ok(logs.some((l) => l.event === "tts-ws-rejected" && l.data?.["status"] === 400));
+      assert.ok(!JSON.stringify({ failure, logs }).includes("secret-key"));
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("maps HTTP upgrade status codes to failure kinds", async () => {
+    for (const [status, code] of [[401, "auth"], [402, "quota"], [429, "rate"], [503, "network"]] as const) {
+      const server = createServer();
+      server.on("upgrade", (_req, sock) => {
+        sock.end(`HTTP/1.1 ${status} X\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}`);
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const { port } = server.address() as AddressInfo;
+      try {
+        const failure = await new Promise<VoiceFailure>((resolve, reject) => {
+          startSpeech(
+            { key: "k", voiceId: "v", onDone: () => reject(new Error("done")), onFailure: resolve },
+            { socketFactory: (_url, init) => createWsTtsSocket(`ws://127.0.0.1:${port}/`, init), sinkFactory: () => makeSink() },
+          );
+        });
+        assert.equal(failure.code, code, `HTTP ${status}`);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
   });
 });

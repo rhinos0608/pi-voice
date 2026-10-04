@@ -76,7 +76,7 @@ Then inside Pi:
 | `/voice list` | List ElevenLabs voices (needs key) |
 | `/voice <voice-id>` | Select the TTS voice by id (saved, no key needed) |
 | `/voice id <id>` | Select the TTS voice by id (explicit form) |
-| `/voice model [id]` | List or select the TTS model (default `eleven_v4_turbo`) |
+| `/voice model [id]` | List or select the TTS model (default `eleven_flash_v2_5`; `eleven_v4_*` models are rejected by the streaming endpoint) |
 | `/voice wake hey-pi\|hi-pi\|both` | Which phrases the local spotter listens for |
 | `/voice sensitivity low\|normal\|high` | Detection strictness (default `normal`) |
 | `/voice mic list\|default\|<name>` | Pick by AVFoundation device name; quote names with spaces (`"iPhone Microphone"`). A missing saved mic falls back to default with a notice |

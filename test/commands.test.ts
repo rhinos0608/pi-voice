@@ -102,13 +102,24 @@ describe("completions", () => {
     assert.ok(items?.some((i) => i.value === "test"));
   });
 
+  // Pi replaces the whole argument text with item.value, so a bare "on"
+  // would turn "/voice tts o" into "/voice on".
+  it("argument completions keep the typed subcommand", async () => {
+    const { env } = makeEnv();
+    const partial = await getVoiceCompletions("tts o", env);
+    assert.deepEqual(partial?.map((i) => i.value), ["tts on", "tts off"]);
+    assert.deepEqual(partial?.map((i) => i.label), ["on", "off"]);
+    const empty = await getVoiceCompletions("autostart ", env);
+    assert.deepEqual(empty?.map((i) => i.value), ["autostart on", "autostart off"]);
+  });
+
   it("inserts quoted device names with spaces", async () => {
     const { env } = makeEnv();
     const items = await getVoiceCompletions("mic iP", env);
-    assert.ok(items?.some((i) => i.value === '"iPhone Microphone"'), JSON.stringify(items));
+    assert.ok(items?.some((i) => i.value === 'mic "iPhone Microphone"'), JSON.stringify(items));
     const plain = await getVoiceCompletions("mic ", env);
-    assert.ok(plain?.some((i) => i.value === "list"));
-    assert.ok(plain?.some((i) => i.value === "default"));
+    assert.ok(plain?.some((i) => i.value === "mic list"));
+    assert.ok(plain?.some((i) => i.value === "mic default"));
   });
 
   it("voice completions show names and insert ids", async () => {
@@ -116,7 +127,7 @@ describe("completions", () => {
     for (const prefix of ["list ra", "id ra"]) {
       const items = await getVoiceCompletions(prefix, env);
       assert.equal(items?.length, 1, prefix);
-      assert.equal(items?.[0].value, "voice-abc123");
+      assert.equal(items?.[0].value, `${prefix.split(" ")[0]} voice-abc123`);
       assert.ok(items?.[0].label.includes("Rachel"));
     }
   });
@@ -133,8 +144,7 @@ describe("completions", () => {
   it("model completions fall back offline without a key", async () => {
     const { env } = makeEnv({ key: undefined });
     const items = await getVoiceCompletions("model eleven_", env);
-    assert.ok(items?.some((i) => i.value === "eleven_v4_turbo"));
-    assert.ok(items?.some((i) => i.value === "eleven_flash_v2_5"));
+    assert.ok(items?.some((i) => i.value === "model eleven_flash_v2_5"));
   });
 
   it("never fetches voices while completing other subcommands", async () => {
@@ -157,12 +167,12 @@ describe("completions", () => {
     const kinds = await getVoiceCompletions("test ", env);
     assert.deepEqual(
       kinds?.map((h) => h.value).sort(),
-      ["mic", "stt", "tts", "wake"],
+      ["test mic", "test stt", "test tts", "test wake"],
     );
     const modes = await getVoiceCompletions("send ", env);
     assert.deepEqual(
       modes?.map((h) => h.value).sort(),
-      ["auto", "review"],
+      ["send auto", "send review"],
     );
   });
 

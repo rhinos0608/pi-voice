@@ -66,7 +66,7 @@ describe("preferences", () => {
       const { writeFileSync } = await import("node:fs");
       writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1 }));
       const loaded = await loadPreferences(dir);
-      assert.equal(loaded.prefs.ttsModel, "eleven_v4_turbo");
+      assert.equal(loaded.prefs.ttsModel, "eleven_flash_v2_5");
       assert.equal(loaded.warning, undefined);
       await savePreferences({ ...DEFAULT_PREFERENCES, ttsModel: "eleven_flash_v2_5" }, dir);
       const reloaded = await loadPreferences(dir);

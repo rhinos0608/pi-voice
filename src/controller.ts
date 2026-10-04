@@ -810,6 +810,14 @@ export class VoiceController {
   onMessageEnd(message: { role?: string; stopReason?: string }, isAssistant: boolean): void {
     if (this.closed || !isAssistant) return;
     if (message.role !== undefined && message.role !== "assistant") return;
+    if (this.speechQueue.length === 0 && !this.ttsActive()) {
+      const prefs = this.deps.getPrefs();
+      this.log("tts-skipped", {
+        ttsOn: prefs.tts,
+        hasVoice: (prefs.voiceId ?? "") !== "",
+        hasCredential: this.deps.getKey() !== undefined,
+      });
+    }
     const stop = message.stopReason;
     if (stop === "aborted" || stop === "error") {
       // Cancel that message's speech and everything queued after it; earlier
@@ -896,6 +904,7 @@ export class VoiceController {
       if (this.speechQueue[0] !== entry) return;
       this.speechQueue.shift();
     }
+    this.log("tts-done");
     this.speech = null;
     this.chunker = null;
     this.advanceSpeechQueue(gen);
@@ -907,6 +916,7 @@ export class VoiceController {
       if (this.speechQueue[0] !== entry) return;
       this.speechQueue.shift();
     }
+    this.log("tts-failure", { code: f.code, retryable: f.retryable, detail: f.message });
     this.speech = null;
     this.chunker = null;
     if (this.isTerminalSpeechFailure(f)) {
@@ -997,6 +1007,7 @@ export class VoiceController {
       return;
     }
     this.speech = entry.speech;
+    this.log("tts-start", { modelId, queued: this.speechQueue.length });
     if (this.phase === "wake" || this.phase === "capture" || this.phase === "submit") {
       this.setPhase("speaking", "🔊 speaking");
     }

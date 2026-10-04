@@ -516,6 +516,32 @@ describe("tts streaming", () => {
     h.fireTimers();
     assert.equal(h.controller.getPhase(), "wake");
   });
+
+  it("logs why an assistant message was not spoken", async () => {
+    const h = makeHarness({ prefs: { tts: false, voiceId: "v1" } });
+    await h.controller.start();
+    h.controller.onMessageUpdate({ role: "assistant" }, "text_delta", "Not spoken. ".repeat(8));
+    h.controller.onMessageEnd({ role: "assistant", stopReason: "stop" }, true);
+    const skipped = h.logs.filter((l) => l.event === "tts-skipped");
+    assert.equal(skipped.length, 1);
+    // Field names avoid /key|token|auth/ so the debug-log redactor keeps them.
+    assert.deepEqual(skipped[0].data, { ttsOn: false, hasVoice: true, hasCredential: true });
+  });
+
+  it("logs speech start, done, and failure detail", async () => {
+    const h = makeHarness({ prefs: { tts: true, voiceId: "v1" } });
+    await h.controller.start();
+    h.controller.onMessageUpdate({ role: "assistant" }, "text_delta", "Spoken prose here. ".repeat(8));
+    h.controller.onMessageEnd({ role: "assistant", stopReason: "stop" }, true);
+    h.speeches[0].opts.onDone();
+    h.controller.onMessageUpdate({ role: "assistant" }, "text_delta", "More prose here. ".repeat(8));
+    h.speeches[1].opts.onFailure({ code: "protocol", message: "speech failed (protocol)", retryable: false });
+    const events = h.logs.map((l) => l.event).filter((e) => e.startsWith("tts-"));
+    assert.deepEqual(events, ["tts-start", "tts-done", "tts-start", "tts-failure"]);
+    const failure = h.logs.find((l) => l.event === "tts-failure");
+    assert.deepEqual(failure?.data, { code: "protocol", retryable: false, detail: "speech failed (protocol)" });
+  });
+
   it("retryable speech failure promotes the next queued message", async () => {
     const h = makeHarness({ prefs: { tts: true, voiceId: "v1" } });
     await h.controller.start();

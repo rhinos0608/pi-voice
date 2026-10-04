@@ -255,7 +255,11 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       options: { includeSend: boolean },
     ) => createWakeDetector(paths, choice, sensitivity, onWake, undefined, options),
     openUtterance: (key, handlers) => startUtterance(key, handlers),
-    openSpeech: (opts) => startSpeech(opts, { sinkFactory: () => createFfplaySink() }),
+    openSpeech: (opts) =>
+      startSpeech(opts, {
+        sinkFactory: () => createFfplaySink(),
+        ...(debug.enabled ? { log: (event: string, data?: Record<string, unknown>) => debug.log(event, data) } : {}),
+      }),
     ensureVadModel: (signal: AbortSignal) => ensureVadModel(signal),
     createEndpointer: (modelPath: string, events: EndpointerEvents) => createEndpointer(modelPath, events),
     ...(debug.enabled ? { log: (event: string, data?: Record<string, unknown>) => debug.log(event, data) } : {}),

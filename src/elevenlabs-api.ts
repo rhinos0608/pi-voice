@@ -16,7 +16,7 @@ export const VOICE_PAGE_SIZE = 100;
 export const DISCOVERY_TIMEOUT_MS = 8000;
 export const DISCOVERY_CACHE_MS = 5 * 60 * 1000;
 
-export const OFFLINE_TTS_MODELS = ["eleven_v4_turbo", "eleven_flash_v2_5"];
+export const OFFLINE_TTS_MODELS = ["eleven_flash_v2_5"];
 
 type CacheEntry<T> = { at: number; value: T };
 

@@ -16,7 +16,7 @@ export type VoicePreferences = {
 
 export const DEFAULT_PREFERENCES: VoicePreferences = {
   version: 1,
-  ttsModel: "eleven_v4_turbo",
+  ttsModel: "eleven_flash_v2_5",
   wake: "both",
   sensitivity: "normal",
   mic: { kind: "default" },

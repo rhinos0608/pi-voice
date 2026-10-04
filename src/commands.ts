@@ -132,7 +132,6 @@ export async function getVoiceCompletions(
 ): Promise<AutocompleteItem[] | null> {
   const { tokens, trailingSpace } = tokenize(argumentPrefix);
   const current = trailingSpace ? "" : (tokens[tokens.length - 1] ?? "");
-  const prev = trailingSpace ? tokens[tokens.length - 1] : tokens[tokens.length - 2];
   const head = (tokens[0] ?? "").toLowerCase();
   const completingFirst = tokens.length === 0 || (tokens.length === 1 && !trailingSpace);
 
@@ -147,6 +146,18 @@ export async function getVoiceCompletions(
     return items;
   }
 
+  // Pi replaces the entire argument text with item.value, so values must
+  // carry the already-typed tokens ("tts on", not "on" → "/voice on").
+  const lead = argumentPrefix.slice(0, argumentPrefix.length - current.length);
+  const items = await completeArgumentValue(head, current, env);
+  return items?.map((item) => ({ ...item, value: lead + item.value })) ?? null;
+}
+
+async function completeArgumentValue(
+  head: string,
+  current: string,
+  env: Pick<CommandEnv, "listDevices" | "listVoices" | "listModels" | "getKey">,
+): Promise<AutocompleteItem[] | null> {
   const completeValues = (options: string[]): AutocompleteItem[] | null => {
     const hits = options.filter((o) => o.toLowerCase().startsWith(current.toLowerCase()));
     return hits.map((value) => ({ value, label: value }));
@@ -161,7 +172,6 @@ export async function getVoiceCompletions(
       return null;
     case "tts":
     case "autostart":
-      if (prev === head || (trailingSpace && tokens.length === 1)) return completeValues(["on", "off"]);
       return completeValues(["on", "off"]);
     case "wake":
       return completeValues(["hey-pi", "hi-pi", "both"]);
