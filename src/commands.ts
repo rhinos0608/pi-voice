@@ -6,7 +6,7 @@
 
 import type { MicDevice, TtsProvider, VoicePreferences } from "./contracts.ts";
 import { speakerThresholdFor } from "./contracts.ts";
-import { cosineSimilarity, LEARN, MIN_ENROLL_CLIPS, RECOMMENDED_ENROLL_CLIPS, addCorrection, learnedCount, resetLearning, type SpeakerProfile } from "./speaker.ts";
+import { cosineSimilarity, LEARN, MIN_ENROLL_CLIPS, addCorrection, learnedCount, resetLearning, scoreSample, type SpeakerProfile } from "./speaker.ts";
 import { DEFAULT_TTS_MODEL } from "./tts.ts";
 import { DEFAULT_INWORLD_MODEL, DEFAULT_INWORLD_VOICE, INWORLD_TTS_MODELS } from "./inworld-tts.ts";
 import type { VoiceController } from "./controller.ts";
@@ -23,21 +23,52 @@ export type CommandCtx = {
   setStatus(key: string, text: string | undefined): void;
 };
 
-/** Guided-enrollment prompt count, from the speaker module's recommendation. */
-const ENROLL_CLIP_COUNT = RECOMMENDED_ENROLL_CLIPS;
+/** Guided-enrollment prompt count: 6 clips target, minimum 5 kept. */
+const ENROLL_CLIP_COUNT = 6;
 
-/** Short varied phrases read aloud during enrollment. Never written to disk. */
+/** Minimum enrollment clips kept before a profile is built. */
+const ENROLL_MIN_KEPT = 5;
+
+/**
+ * Longer natural sentences, each yielding >= 3 s of VAD speech when read
+ * aloud at a normal pace. Never written to disk.
+ */
 const ENROLL_PHRASES: readonly string[] = [
-  "The quick brown fox jumps over the lazy dog",
-  "Pack my box with five dozen liquor jugs",
-  "How vexingly quick daft zebras jump",
-  "She sells seashells by the seashore",
-  "The five boxing wizards jump quickly",
-  "Weave a circle round him thrice",
+  "The quick brown fox jumps over the lazy dog while the river flows quietly behind the old wooden fence",
+  "Pack my box with five dozen liquor jugs before the delivery truck leaves the warehouse this afternoon",
+  "She sells seashells by the seashore every sunny morning while the waves crash against the rocks",
+  "The five boxing wizards jump quickly across the stage as the excited crowd cheers loudly for more",
+  "Weave a circle round him thrice while the evening bells ring softly across the quiet village green",
+  "How vexingly quick daft zebras jump when the safari guide opens the gate at sunrise every day",
 ];
 
 /** Minimum speech per enrollment clip in ms; shorter captures are repeated. */
-const ENROLL_MIN_SPEECH_MS = 1500;
+const ENROLL_MIN_SPEECH_MS = 2500;
+
+/** A clip whose mean cosine to the others is below this is flagged for re-recording. Provisional. */
+const ENROLL_OUTLIER_CUTOFF = 0.6;
+
+/** Max re-record retries per phrase after an outlier flag. */
+const ENROLL_OUTLIER_RETRIES = 2;
+
+/** A final pairwise mean below this warns the audio path may be degraded. */
+const ENROLL_MATRIX_WARN_MEAN = 0.65;
+
+/** Mean/min over the off-diagonal of the pairwise cosine matrix. */
+function pairwiseSummary(embeddings: Float32Array[]): { mean: number; min: number } {
+  let sum = 0;
+  let count = 0;
+  let min = 1;
+  for (let i = 0; i < embeddings.length; i++) {
+    for (let j = i + 1; j < embeddings.length; j++) {
+      const s = cosineSimilarity(embeddings[i] as Float32Array, embeddings[j] as Float32Array);
+      sum += s;
+      count += 1;
+      if (s < min) min = s;
+    }
+  }
+  return { mean: count === 0 ? 1 : sum / count, min: count === 0 ? 1 : min };
+}
 
 /** Retries per phrase before enrollment aborts. */
 const ENROLL_MAX_REPEATS = 3;
@@ -479,11 +510,11 @@ async function runSpeakerTest(ctx: CommandCtx, env: CommandEnv): Promise<void> {
     return;
   }
   const embedder = sp.createEmbedder(modelPath);
-  const score = cosineSimilarity(embedder.embed(capture.pcm), profile.centroid);
+  const score = scoreSample(profile, embedder.embed(capture.pcm));
   const threshold = speakerThresholdFor(profile.suggestedThreshold, prefs.speakerCheck);
   const decision = score >= threshold ? "accept" : "reject";
   ctx.notify(
-    `speaker test: score ${score.toFixed(2)} vs threshold ${threshold.toFixed(2)} (${prefs.speakerCheck}) — ${decision} (nothing submitted)`,
+    `speaker test: score ${score.toFixed(2)} vs threshold ${threshold.toFixed(2)} (${prefs.speakerCheck}) — ${decision} (nothing submitted, speech ${Math.round(capture.speechMs)} ms)`,
     "info",
   );
 }
@@ -569,6 +600,13 @@ async function runEnrollment(ctx: CommandCtx, env: CommandEnv): Promise<void> {
     const embeddings: Float32Array[] = [];
     let index = 0;
     const repeats = new Map<number, number>();
+    const outlierRetries = new Map<number, number>();
+    const meanCosineTo = (candidate: Float32Array, others: Float32Array[]): number => {
+      if (others.length === 0) return 1;
+      let sum = 0;
+      for (const other of others) sum += cosineSimilarity(candidate, other);
+      return sum / others.length;
+    };
     while (index < phrases.length) {
       if (session.abort.signal.aborted) {
         ctx.notify("Enrollment cancelled.", "warning");
@@ -599,13 +637,35 @@ async function runEnrollment(ctx: CommandCtx, env: CommandEnv): Promise<void> {
         continue;
       }
       // Enrollment audio stays in memory; it is embedded and never written to disk.
-      embeddings.push(embedder.embed(capture.pcm));
+      const candidate = embedder.embed(capture.pcm);
+      if (embeddings.length >= 2) {
+        const mean = meanCosineTo(candidate, embeddings);
+        ctx.notify(`Clip ${embeddings.length + 1} mean similarity to the others: ${mean.toFixed(2)}.`, "info");
+        if (mean < ENROLL_OUTLIER_CUTOFF) {
+          const seen = (outlierRetries.get(index) ?? 0) + 1;
+          outlierRetries.set(index, seen);
+          if (seen <= ENROLL_OUTLIER_RETRIES) {
+            ctx.notify(
+              `Clip ${embeddings.length + 1} looks different from the others (mean similarity ${mean.toFixed(2)} < ${ENROLL_OUTLIER_CUTOFF.toFixed(2)}) — please re-record: "${phrase}"`,
+              "warning",
+            );
+            continue;
+          }
+          ctx.notify(
+            `Clip ${embeddings.length + 1} still differs (mean similarity ${mean.toFixed(2)}); keeping it after ${ENROLL_OUTLIER_RETRIES} re-tries.`,
+            "warning",
+          );
+        }
+      }
+      embeddings.push(candidate);
       index += 1;
     }
-    if (embeddings.length < MIN_ENROLL_CLIPS) {
-      ctx.notify(`Enrollment needs at least ${MIN_ENROLL_CLIPS} clips; got ${embeddings.length}.`, "warning");
+    const minKept = Math.max(MIN_ENROLL_CLIPS, ENROLL_MIN_KEPT);
+    if (embeddings.length < minKept) {
+      ctx.notify(`Enrollment needs at least ${minKept} clips; got ${embeddings.length}.`, "warning");
       return;
     }
+    const pairwise = pairwiseSummary(embeddings);
     const profile = sp.buildProfile(embeddings, modelPath);
     await sp.saveProfile(profile);
     const scores = profile.enrollScores.map((s) => s.toFixed(2)).join(", ");
@@ -614,6 +674,16 @@ async function runEnrollment(ctx: CommandCtx, env: CommandEnv): Promise<void> {
       `Enrolled ${embeddings.length} clips. Scores: ${scores}. Threshold: suggested ${profile.suggestedThreshold.toFixed(2)} (effective ${effective.toFixed(2)} at ${env.getPrefs().speakerCheck}).`,
       "info",
     );
+    ctx.notify(
+      `Pairwise clip similarity: mean ${pairwise.mean.toFixed(2)}, min ${pairwise.min.toFixed(2)} (${embeddings.length} clips).`,
+      "info",
+    );
+    if (pairwise.mean < ENROLL_MATRIX_WARN_MEAN) {
+      ctx.notify(
+        `Enrollment quality is low (mean ${pairwise.mean.toFixed(2)} < ${ENROLL_MATRIX_WARN_MEAN.toFixed(2)}): the audio path may be degraded. Try re-enrolling in a quieter spot with a headset, or run research/speaker-diag/diag.mjs to diagnose.`,
+        "warning",
+      );
+    }
   } finally {
     activeEnrollment = null;
     if (wasListening && !session.abort.signal.aborted) await env.controller.start();

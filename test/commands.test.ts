@@ -596,7 +596,7 @@ describe("isolation and speaker commands", () => {
     assert.ok(bag.notified.some((n) => n.message === "Usage: /voice speaker off|low|normal|high|forget|learn on|off|that-was-me|reset-learning"));
   });
 
-  it("enroll guides five phrases, embeds, saves, and reports scores", async () => {
+  it("enroll guides six phrases, embeds, saves, and reports scores", async () => {
     const bag = makeEnv();
     let starts = 0;
     const origStart = bag.env.controller.start.bind(bag.env.controller);
@@ -607,10 +607,11 @@ describe("isolation and speaker commands", () => {
     const sp = makeSpokedEnv(bag, { profile: undefined });
     await handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
     const text = bag.notified.map((n) => n.message).join("\n");
-    assert.ok(text.includes('Enroll 1/5: read aloud'));
-    assert.ok(text.includes('Enroll 5/5: read aloud'));
+    assert.ok(text.includes('Enroll 1/6: read aloud'));
+    assert.ok(text.includes('Enroll 6/6: read aloud'));
     assert.equal(sp.saved.length, 1);
-    assert.ok(/Enrolled 5 clips. Scores: .* Threshold: suggested 0\.78 \(effective 0\.78 at normal\)\./.test(text));
+    assert.ok(/Enrolled 6 clips. Scores: .* Threshold: suggested 0\.78 \(effective 0\.78 at normal\)\./.test(text));
+    assert.ok(/Pairwise clip similarity: mean 1\.00, min 1\.00 \(6 clips\)/.test(text), text);
     assert.equal(starts, 1);
   });
 
@@ -627,8 +628,57 @@ describe("isolation and speaker commands", () => {
     });
     await handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
     assert.ok(bag.notified.some((n) => /Too short/.test(n.message)));
-    assert.ok(bag.notified.some((n) => /Enrolled 5 clips/.test(n.message)));
-    assert.equal(calls, 6);
+    assert.ok(bag.notified.some((n) => /Enrolled 6 clips/.test(n.message)));
+    assert.equal(calls, 7);
+  });
+
+  it("enroll flags an outlier clip and asks to re-record it", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag, { profile: undefined });
+    const tags = ["A", "A", "OUT", "A", "A", "A", "A", "A"];
+    let n = 0;
+    bag.env.speaker!.capturePhrase = async (): Promise<CaptureResult> => ({
+      status: "ok",
+      pcm: Buffer.from(tags[n++] ?? "A"),
+      speechMs: 3000,
+    });
+    bag.env.speaker!.createEmbedder = () => ({
+      embed: (pcm: Buffer): Float32Array =>
+        pcm.toString() === "OUT" ? new Float32Array([0, 1]) : new Float32Array([1, 0]),
+    });
+    await handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((m) => m.message).join("\n");
+    assert.ok(/re-record/i.test(text), text);
+    assert.ok(/mean similarity 0\.00/.test(text), text);
+    assert.ok(/Enrolled 6 clips/.test(text), text);
+    assert.ok(/Pairwise clip similarity: mean 1\.00, min 1\.00 \(6 clips\)/.test(text), text);
+    assert.ok(!/audio path may be degraded/.test(text), text);
+    assert.equal(n, 7);
+  });
+
+  it("enroll warns when the pairwise mean suggests a degraded audio path", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag, { profile: undefined });
+    // Three A clips, then three B clips at cosine 0.38 to A: retries are
+    // exhausted on the low clips, and the final mean lands below 0.65.
+    const tags = ["A", "A", "A", "B", "B", "B", "B", "B", "B", "B"];
+    let n = 0;
+    bag.env.speaker!.capturePhrase = async (): Promise<CaptureResult> => ({
+      status: "ok",
+      pcm: Buffer.from(tags[n++] ?? "A"),
+      speechMs: 3000,
+    });
+    bag.env.speaker!.createEmbedder = () => ({
+      embed: (pcm: Buffer): Float32Array =>
+        pcm.toString() === "B" ? new Float32Array([0.38, 0.925]) : new Float32Array([1, 0]),
+    });
+    await handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((m) => m.message).join("\n");
+    assert.ok(/Enrolled 6 clips/.test(text), text);
+    assert.ok(/Pairwise clip similarity: mean 0\.63, min 0\.38/.test(text), text);
+    assert.ok(/audio path may be degraded/.test(text), text);
+    assert.ok(/diag\.mjs/.test(text), text);
+    assert.equal(n, 10);
   });
 
   it("enroll is cancellable with /voice off and does not resume listening", async () => {
@@ -660,8 +710,33 @@ describe("isolation and speaker commands", () => {
     makeSpokedEnv(bag);
     await handleVoiceCommand("test speaker", ctxFor(bag.notified), bag.env);
     assert.ok(
-      bag.notified.some((n) => /speaker test: score 1\.00 vs threshold 0\.78 \(normal\) — accept \(nothing submitted\)/.test(n.message)),
+      bag.notified.some((n) => /speaker test: score 1\.00 vs threshold 0\.78 \(normal\) — accept \(nothing submitted, speech 2000 ms\)/.test(n.message)),
     );
+  });
+
+  it("test speaker uses the gate scoring (exemplar), not raw centroid cosine", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag, {
+      profile: {
+        version: 1,
+        model: "/tmp/speaker.onnx",
+        dim: 2,
+        centroid: [1, 0],
+        enrolledAt: "2026-01-02T00:00:00.000Z",
+        enrollScores: [0.9, 0.9, 0.9, 0.9],
+        suggestedThreshold: 0.78,
+        anchors: [[0, 1]],
+      },
+    });
+    // Raw cosine to the centroid is 0.00 (reject), but the gate's exemplar
+    // term scores 1.00 against the anchor (accept).
+    bag.env.speaker!.createEmbedder = () => ({
+      embed: () => new Float32Array([0, 1]),
+    });
+    await handleVoiceCommand("test speaker", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((m) => m.message).join("\n");
+    assert.ok(/speaker test: score 1\.00 vs threshold 0\.78 \(normal\) — accept/.test(text), text);
+    assert.ok(/speech 2000 ms/.test(text), text);
   });
 
   it("test speaker is off without a profile", async () => {

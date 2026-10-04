@@ -138,6 +138,10 @@ export type CreateVoiceIoOpts = {
   helperPath: string;
   input?: string;
   voiceProcessing?: boolean;
+  /** Opt-in to the helper's voice-processing AGC. Default off (level swings hurt embeddings). */
+  agc?: boolean;
+  /** Diagnostic only: bypass voice-processing DSP while keeping the same pipeline. Default off. */
+  bypass?: boolean;
   spawnImpl?: typeof spawn;
   log?: (event: string, data?: unknown) => void;
 };
@@ -217,6 +221,8 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
   function helperArgs(): string[] {
     const args = ["--voice-processing", voiceProcessing ? "on" : "off"];
     if (opts.input !== undefined) args.push("--input", opts.input);
+    if (opts.agc === true) args.push("--agc", "on");
+    if (opts.bypass === true) args.push("--bypass", "on");
     return args;
   }
 

@@ -311,7 +311,13 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     return (pcm: Buffer) => embedder.embed(pcm);
   }
 
-  /** Record one enrollment phrase in memory (never written to disk) until VAD end-of-speech, max ~6 s. */
+  /**
+   * Record one enrollment phrase in memory (never written to disk) until VAD
+   * end-of-speech, max ~10 s. Only frames while VAD reports speech are kept,
+   * mirroring how the controller feeds the live gate (VAD-open frames only),
+   * so enrollment and gating embed the same framing: no leading/trailing
+   * silence and no cue sounds. Requires >= 2.5 s of speech.
+   */
   async function captureEnrollmentPhrase(
     _prompt: string,
     opts: { signal: AbortSignal },
@@ -327,13 +333,16 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       const chunks: Buffer[] = [];
       let speechBytes = 0;
       let heard = false;
+      let vadOpen = false;
       let done = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const endpointer = createEndpointer(vadPath, {
         onSpeechStart: () => {
           heard = true;
+          vadOpen = true;
         },
         onSpeechEnd: () => {
+          vadOpen = false;
           finishOk();
         },
       });
@@ -348,7 +357,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         cleanup();
         void source.stop().catch(() => undefined);
         const speechMs = speechBytes / 32;
-        if (!heard || speechMs < 1500) resolve({ status: "too-short", speechMs });
+        if (!heard || speechMs < 2500) resolve({ status: "too-short", speechMs });
         else resolve({ status: "ok", pcm: Buffer.concat(chunks), speechMs });
       };
       const onAbort = (): void => {
@@ -373,7 +382,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       opts.signal.addEventListener("abort", onAbort, { once: true });
       timer = setTimeout(() => {
         finishOk();
-      }, 6000);
+      }, 10000);
       void source
         .start(
           (chunk) => {
@@ -384,7 +393,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
               finishOk();
               return;
             }
-            if (heard) {
+            if (vadOpen) {
               chunks.push(chunk);
               speechBytes += chunk.length;
             }

@@ -1310,8 +1310,9 @@ describe("speaker gate vad scoping", () => {
     h.utterances[0]!.handlers.onFinal("owner words here");
     // The transcript still submits normally; only learning is gated on speech.
     assert.deepEqual(h.host.sent[0], { text: "owner words here", opts: undefined });
-    // Only the 0.8 s of VAD-flagged speech was embedded: 800 ms, not 800 + 3000.
-    assert.deepEqual(embeddedBytes, [8 * FRAME_100MS]);
+    // Only the 0.8 s of VAD-flagged speech counts: 800 ms, not 800 + 3000.
+    // Below the 1500 ms insufficient floor nothing is embedded at all.
+    assert.deepEqual(embeddedBytes, []);
     const speakerLogs = h.logs.filter((l) => l.event === "speaker");
     const last = speakerLogs.at(-1);
     assert.ok(last !== undefined, "expected a speaker verdict log");
@@ -1319,12 +1320,10 @@ describe("speaker gate vad scoping", () => {
       Math.abs((last?.data?.["speechMs"] as number) - 800) < 1,
       `expected speechMs ~= 800, got ${String(last?.data?.["speechMs"])}`,
     );
-    // 800 ms is below the 2 s learning minimum: submitted, never learned.
+    // 800 ms is below the 1500 ms insufficient floor: submitted, never
+    // scored, never learned (no accepted embedding, no learn attempt).
     assert.equal(saves.length, 0);
-    assert.ok(
-      h.logs.some((l) => l.event === "speaker-learn" && l.data?.["reason"] === "too-short"),
-      "expected a too-short speaker-learn log",
-    );
+    assert.ok(!h.logs.some((l) => l.event === "speaker-learn"), "expected no speaker-learn attempt for insufficient speech");
   });
 
   it("two speech segments separated by a pause accumulate in the real gate; pause audio is not", async () => {

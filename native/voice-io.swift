@@ -219,45 +219,54 @@ final class VoiceIo {
     /// fails with -10849 kAudioUnitErr_Initialized. Device goes on the
     /// input bus (element 1); both buses are enabled first.
     private func applyDevice(named name: String) {
-        guard let deviceID = inputDeviceID(named: name) else {
-            events.emit(["event": "error", "code": "device", "message": "Input device not found: \(name)"])
-            _exit(2)
-        }
-        guard let unit = input.audioUnit else {
-            events.emit(["event": "error", "code": "device", "message": "Input audio unit unavailable"])
-            _exit(2)
-        }
-        var id = deviceID
-        var enableIn: UInt32 = 1
-        _ = AudioUnitSetProperty(
-            unit,
-            kAudioOutputUnitProperty_EnableIO,
-            kAudioUnitScope_Input,
-            1,
-            &enableIn,
-            UInt32(MemoryLayout<UInt32>.size))
-        var enableOut: UInt32 = 1
-        _ = AudioUnitSetProperty(
-            unit,
-            kAudioOutputUnitProperty_EnableIO,
-            kAudioUnitScope_Output,
-            0,
-            &enableOut,
-            UInt32(MemoryLayout<UInt32>.size))
-        let status = AudioUnitSetProperty(
-            unit,
-            kAudioOutputUnitProperty_CurrentDevice,
-            kAudioUnitScope_Global,
-            1,
-            &id,
-            UInt32(MemoryLayout<AudioDeviceID>.size))
-        if status != noErr {
-            events.emit(["event": "error", "code": "device", "message": "Failed to select input device \(name) (OSStatus \(status))"])
+        if let message = selectInputDevice(input, named: name) {
+            events.emit(["event": "error", "code": "device", "message": message])
             _exit(2)
         }
     }
 
+    /// Shared device selection for the capture path and --probe-channels.
+    /// Returns an error message, or nil on success.
+    private func selectInputDevice(_ input: AVAudioInputNode, named name: String) -> String? {
+    guard let deviceID = inputDeviceID(named: name) else {
+        return "Input device not found: \(name)"
+    }
+    guard let unit = input.audioUnit else {
+        return "Input audio unit unavailable"
+    }
+    var id = deviceID
+    var enableIn: UInt32 = 1
+    _ = AudioUnitSetProperty(
+        unit,
+        kAudioOutputUnitProperty_EnableIO,
+        kAudioUnitScope_Input,
+        1,
+        &enableIn,
+        UInt32(MemoryLayout<UInt32>.size))
+    var enableOut: UInt32 = 1
+    _ = AudioUnitSetProperty(
+        unit,
+        kAudioOutputUnitProperty_EnableIO,
+        kAudioUnitScope_Output,
+        0,
+        &enableOut,
+        UInt32(MemoryLayout<UInt32>.size))
+    let status = AudioUnitSetProperty(
+        unit,
+        kAudioOutputUnitProperty_CurrentDevice,
+        kAudioUnitScope_Global,
+        1,
+        &id,
+        UInt32(MemoryLayout<AudioDeviceID>.size))
+    if status != noErr {
+        return "Failed to select input device \(name) (OSStatus \(status))"
+    }
+    return nil
+    }
+
     var deviceName: String?
+    var agcEnabled = false
+    var bypassEnabled = false
 
     func start() {
         if voiceProcessing {
@@ -266,6 +275,11 @@ final class VoiceIo {
             } catch {
                 emitError(code: "engine", message: "Failed to enable voice processing: \(error.localizedDescription)")
             }
+            // AGC defaults ON in the VP unit; speaker embeddings want stable
+            // levels, so default it off here (re-enable with --agc on).
+            input.isVoiceProcessingAGCEnabled = agcEnabled
+            // Bypass is diagnostic only (A/B processed vs raw on one helper).
+            input.isVoiceProcessingBypassed = bypassEnabled
         }
         if let name = deviceName {
             applyDevice(named: name)
@@ -335,12 +349,26 @@ final class VoiceIo {
 
     private func handleTap(buffer: AVAudioPCMBuffer) {
         guard let target = captureFormat else { return }
-        // Manual downmix: the VP tap can expose 9 channels, and
-        // AVAudioConverter's default multichannel-to-mono map yields
-        // silence. Average to mono float first, then resample/quantize.
+        // Channel strategy: with voice processing the tap exposes N channels
+        // (9 on this hardware) where channel 0 is the processed voice and the
+        // rest are raw/reference. Averaging ALL channels dilutes the voice
+        // with unprocessed energy (the embedding inconsistency). Select
+        // channel 0 via the converter's channelMap. Without VP, average a
+        // plain multichannel tap to mono (legacy behavior).
         let channels = Int(buffer.format.channelCount)
         let n = Int(buffer.frameLength)
         guard n > 0 else { return }
+        if voiceProcessing && channels > 1 {
+            let (conv, mapOK) = directConverter(from: buffer.format, to: target)
+            if mapOK {
+                streamConvert(buffer, conv: conv, engine: engine)
+                return
+            }
+            // channelMap rejected: copy channel 0 to mono on the host.
+            guard let ch0 = copyChannel(buffer, channel: 0) else { return }
+            streamConvert(ch0, conv: monoConverter(from: ch0.format, to: target), engine: engine)
+            return
+        }
         let mono: AVAudioPCMBuffer
         if channels == 1 {
             mono = buffer
@@ -361,23 +389,74 @@ final class VoiceIo {
             mono = mix
         }
         let conv = monoConverter(from: mono.format, to: target)
-        let ratio = kCaptureSampleRate / max(mono.format.sampleRate, 1)
-        let frames = AVAudioFrameCount(Double(n) * ratio) + 16
-        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: frames) else { return }
-        var supplied = false
-        var error: NSError?
-        let status: AVAudioConverterOutputStatus = conv.convert(to: out, error: &error) { _, outStatus in
-            if supplied {
+        streamConvert(mono, conv: conv, engine: engine)
+    }
+
+    /// Stream one tap buffer through a persistent converter, draining any
+    /// leftover (`.inputRanDry`) instead of dropping it. The converter
+    /// instance persists across tap buffers so SRC state carries over and no
+    /// boundary frames are lost.
+    private func streamConvert(_ source: AVAudioPCMBuffer, conv: AVAudioConverter, engine: AVAudioEngine) {
+        guard let target = captureFormat else { return }
+        let ratio = kCaptureSampleRate / max(source.format.sampleRate, 1)
+        let frames = AVAudioFrameCount(Double(source.frameLength) * ratio) + 128
+        var pending: AVAudioPCMBuffer? = source
+        var status: AVAudioConverterOutputStatus = .haveData
+        var iterations = 0
+        while (status == .haveData || status == .inputRanDry) && iterations < 8 {
+            iterations += 1
+            guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: frames) else { return }
+            var error: NSError?
+            status = conv.convert(to: out, error: &error) { _, outStatus in
+                if let p = pending {
+                    pending = nil
+                    outStatus.pointee = AVAudioConverterInputStatus.haveData
+                    return p
+                }
                 outStatus.pointee = AVAudioConverterInputStatus.noDataNow
                 return nil
             }
-            supplied = true
-            outStatus.pointee = AVAudioConverterInputStatus.haveData
-            return mono
+            guard status != .error, let ptr = out.int16ChannelData else { return }
+            if out.frameLength > 0 {
+                let bytes = Data(bytes: ptr[0], count: Int(out.frameLength) * 2)
+                writeStdoutFully(bytes, engine: engine)
+            }
         }
-        guard status != .error, out.frameLength > 0, let ptr = out.int16ChannelData else { return }
-        let bytes = Data(bytes: ptr[0], count: Int(out.frameLength) * 2)
-        writeStdoutFully(bytes, engine: engine)
+    }
+
+    /// Direct tap-format converter with channelMap [0]: output mono is the
+    /// processed voice channel. Falls back to a plain converter (plus
+    /// host-side ch0 copy) if the map cannot be verified.
+    private var cachedDirectConverter: (AVAudioConverter, AVAudioFormat, Bool)?
+
+    private func directConverter(from: AVAudioFormat, to: AVAudioFormat) -> (AVAudioConverter, Bool) {
+        if let (conv, fmt, ok) = cachedDirectConverter, fmt == from {
+            return (conv, ok)
+        }
+        let conv = AVAudioConverter(from: from, to: to)!
+        conv.channelMap = [0 as NSNumber]
+        let ok = conv.channelMap.count == 1 && conv.channelMap[0].intValue == 0
+        cachedDirectConverter = (conv, from, ok)
+        if !ok {
+            fputs("voice-io: channelMap [0] rejected, falling back to host ch0 copy\n", stderr)
+        }
+        return (conv, ok)
+    }
+
+    /// Host-side copy of one channel of a tap buffer into a mono buffer.
+    private func copyChannel(_ buffer: AVAudioPCMBuffer, channel: Int) -> AVAudioPCMBuffer? {
+        let n = Int(buffer.frameLength)
+        guard n > 0, channel < Int(buffer.format.channelCount),
+            let src = buffer.floatChannelData,
+            let monoFmt = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32, sampleRate: buffer.format.sampleRate,
+                channels: 1, interleaved: false),
+            let mono = AVAudioPCMBuffer(pcmFormat: monoFmt, frameCapacity: buffer.frameLength),
+            let dst = mono.floatChannelData
+        else { return nil }
+        mono.frameLength = buffer.frameLength
+        memcpy(dst[0], src[channel], n * MemoryLayout<Float>.size)
+        return mono
     }
 
     private var cachedMonoConverter: (AVAudioConverter, AVAudioFormat)?
@@ -591,12 +670,177 @@ private func runControlLoop(_ vio: VoiceIo) {
 }
 
 private func printUsage() {
-    fputs("usage: voice-io [--voice-processing on|off] [--input <name>] [--list-devices]\n", stderr)
+    fputs("usage: voice-io [--voice-processing on|off] [--input <name>] [--list-devices] [--agc on|off] [--bypass on|off] [--probe-channels <seconds>]\n", stderr)
+}
+
+// MARK: - --probe-channels: raw-tap per-channel diagnostics.
+//
+// Records the untouched tap buffer for N seconds and prints one JSON object
+// to stdout: per-channel RMS dBFS, peak, exact-zero fraction, Pearson
+// correlation with channel 0, and lag of max normalized cross-correlation
+// with channel 0, plus total frames vs wall-clock. Ambient room sound only;
+// never plays audio. Exits 0 on success, 2 on setup failure.
+private func runProbe(seconds: Double, voiceProcessing: Bool, deviceName: String?, agc: Bool, bypass: Bool) -> Never {
+    let engine = AVAudioEngine()
+    let input = engine.inputNode
+    if voiceProcessing {
+        do {
+            try input.setVoiceProcessingEnabled(true)
+        } catch {
+            fputs("voice-io: failed to enable voice processing: \(error.localizedDescription)\n", stderr)
+            _exit(2)
+        }
+        input.isVoiceProcessingAGCEnabled = agc
+        input.isVoiceProcessingBypassed = bypass
+    }
+    if let name = deviceName {
+        guard let deviceID = inputDeviceID(named: name) else {
+            fputs("voice-io: input device not found: \(name)\n", stderr)
+            _exit(2)
+        }
+        guard let unit = input.audioUnit else {
+            fputs("voice-io: input audio unit unavailable\n", stderr)
+            _exit(2)
+        }
+        var id = deviceID
+        var enableIn: UInt32 = 1
+        _ = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &enableIn, UInt32(MemoryLayout<UInt32>.size))
+        var enableOut: UInt32 = 1
+        _ = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &enableOut, UInt32(MemoryLayout<UInt32>.size))
+        let status = AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 1, &id, UInt32(MemoryLayout<AudioDeviceID>.size))
+        if status != noErr {
+            fputs("voice-io: failed to select input device \(name) (OSStatus \(status))\n", stderr)
+            _exit(2)
+        }
+    }
+    let hw = input.outputFormat(forBus: 0)
+    let channels = max(Int(hw.channelCount), 1)
+    let rate = max(hw.sampleRate, 1)
+    let lock = NSLock()
+    var bufs = [[Float]](repeating: [], count: channels)
+    var frames = 0
+    input.installTap(onBus: 0, bufferSize: 4096, format: hw) { buffer, _ in
+        let n = Int(buffer.frameLength)
+        guard n > 0, let src = buffer.floatChannelData, Int(buffer.format.channelCount) == channels else { return }
+        var chunk = [UnsafeBufferPointer<Float>]()
+        chunk.reserveCapacity(channels)
+        for c in 0 ..< channels { chunk.append(UnsafeBufferPointer(start: src[c], count: n)) }
+        lock.lock()
+        for c in 0 ..< channels { bufs[c].append(contentsOf: chunk[c]) }
+        frames += n
+        lock.unlock()
+    }
+    do {
+        try engine.start()
+    } catch {
+        fputs("voice-io: engine start failed: \(error.localizedDescription)\n", stderr)
+        _exit(2)
+    }
+    let wallStart = Date()
+    Thread.sleep(forTimeInterval: seconds)
+    let wall = Date().timeIntervalSince(wallStart)
+    engine.stop()
+    input.removeTap(onBus: 0)
+    lock.lock()
+    let snap = bufs
+    let totalFrames = frames
+    lock.unlock()
+
+    let ref = snap[0]
+    let prefix = min(48_000, totalFrames)
+    var chanStats: [[String: Any]] = []
+    for c in 0 ..< channels {
+        let a = snap[c]
+        var sumSq = 0.0
+        var peak: Float = 0
+        var zeros = 0
+        for v in a {
+            let d = Double(v)
+            sumSq += d * d
+            let av = abs(v)
+            if av > peak { peak = av }
+            if v == 0 { zeros += 1 }
+        }
+        let count = Double(max(a.count, 1))
+        let rms = sqrt(sumSq / count)
+        let db: Double = rms > 0 ? 20 * log10(rms) : -120
+        var corr = 1.0
+        if c > 0 {
+            let m = min(a.count, ref.count)
+            var sx = 0.0, sy = 0.0, sxx = 0.0, syy = 0.0, sxy = 0.0
+            for i in 0 ..< m {
+                let x = Double(ref[i]), y = Double(a[i])
+                sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y
+            }
+            let md = Double(max(m, 1))
+            let denom = sqrt(max((sxx - sx * sx / md) * (syy - sy * sy / md), 0))
+            corr = denom > 0 ? (sxy - sx * sy / md) / denom : 0
+        }
+        var bestLag = 0
+        var bestCorr = 0.0
+        if c > 0 && prefix > 128 {
+            var lag = -64
+            while lag <= 64 {
+                let lo = max(0, -lag)
+                let hi = min(prefix, prefix - lag)
+                var num = 0.0, exx = 0.0, eyy = 0.0
+                var i = lo
+                while i < hi {
+                    let x = Double(ref[i]), y = Double(a[i + lag])
+                    num += x * y; exx += x * x; eyy += y * y
+                    i += 1
+                }
+                let den = sqrt(exx * eyy)
+                let r = den > 0 ? num / den : 0
+                if abs(r) > abs(bestCorr) { bestCorr = r; bestLag = lag }
+                lag += 1
+            }
+        } else if c == 0 {
+            bestCorr = 1.0
+        }
+        chanStats.append([
+            "channel": c,
+            "samples": a.count,
+            "rmsDbfs": db,
+            "peak": Double(peak),
+            "zeroFraction": Double(zeros) / count,
+            "corrWithCh0": corr,
+            "bestLagSamples": bestLag,
+            "bestLagCorr": bestCorr,
+        ])
+    }
+    let report: [String: Any] = [
+        "mode": "probe-channels",
+        "voiceProcessing": voiceProcessing,
+        "agc": agc,
+        "bypass": bypass,
+        "device": deviceName ?? "",
+        "sampleRate": rate,
+        "channels": channels,
+        "requestedSeconds": seconds,
+        "wallSeconds": wall,
+        "totalFrames": totalFrames,
+        "expectedFrames": Int(wall * rate),
+        "framesPerSecond": Double(totalFrames) / max(wall, 1e-6),
+        "channelStats": chanStats,
+    ]
+    if let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
+        let s = String(data: data, encoding: .utf8) {
+        print(s)
+        fflush(stdout)
+    } else {
+        fputs("voice-io: failed to encode probe report\n", stderr)
+        _exit(2)
+    }
+    _exit(0)
 }
 
 private var argVoiceProcessing = true
 private var argInput: String?
 private var argListDevices = false
+private var argAgc = false
+private var argBypass = false
+private var argProbeSeconds: Double?
 
 private var i = 1
 while i < CommandLine.arguments.count {
@@ -614,6 +858,24 @@ while i < CommandLine.arguments.count {
     case "--list-devices":
         argListDevices = true
         i += 1
+    case "--agc":
+        guard i + 1 < CommandLine.arguments.count else { printUsage(); _exit(2) }
+        let agcVal = CommandLine.arguments[i + 1]
+        if agcVal == "on" { argAgc = true }
+        else if agcVal == "off" { argAgc = false }
+        else { printUsage(); _exit(2) }
+        i += 2
+    case "--bypass":
+        guard i + 1 < CommandLine.arguments.count else { printUsage(); _exit(2) }
+        let bypassVal = CommandLine.arguments[i + 1]
+        if bypassVal == "on" { argBypass = true }
+        else if bypassVal == "off" { argBypass = false }
+        else { printUsage(); _exit(2) }
+        i += 2
+    case "--probe-channels":
+        guard i + 1 < CommandLine.arguments.count, let probeSecs = Double(CommandLine.arguments[i + 1]), probeSecs > 0, probeSecs <= 30 else { printUsage(); _exit(2) }
+        argProbeSeconds = probeSecs
+        i += 2
     case "-h", "--help":
         printUsage()
         _exit(0)
@@ -665,7 +927,13 @@ private func ensureRecordPermission() {
 
 ensureRecordPermission()
 
+if let secs = argProbeSeconds {
+    runProbe(seconds: secs, voiceProcessing: argVoiceProcessing, deviceName: argInput, agc: argAgc, bypass: argBypass)
+}
+
 let vio = VoiceIo(voiceProcessing: argVoiceProcessing)
 vio.deviceName = argInput
+vio.agcEnabled = argAgc
+vio.bypassEnabled = argBypass
 vio.start()
 runControlLoop(vio)

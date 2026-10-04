@@ -285,6 +285,34 @@ describe("voice-io ref-counting", () => {
     await h.source.stop();
     await h.close();
   });
+
+  it("passes --agc on through to the helper only when opted in", async () => {
+    const { calls, children, spawnImpl } = makeSpawn();
+    const h = createVoiceIo({ helperPath: "/bin/voice-io", agc: true, spawnImpl });
+    const started = h.source.start(
+      () => {},
+      () => {},
+    );
+    assert.deepEqual(calls[0]?.args, ["--voice-processing", "on", "--agc", "on"]);
+    emitReady(children[0] as FakeChild);
+    await started;
+    await h.source.stop();
+    await h.close();
+  });
+
+  it("omits --agc by default (helper default is off)", async () => {
+    const { calls, children, spawnImpl } = makeSpawn();
+    const h = createVoiceIo({ helperPath: "/bin/voice-io", spawnImpl });
+    const started = h.source.start(
+      () => {},
+      () => {},
+    );
+    assert.deepEqual(calls[0]?.args, ["--voice-processing", "on"]);
+    emitReady(children[0] as FakeChild);
+    await started;
+    await h.source.stop();
+    await h.close();
+  });
 });
 
 describe("voice-io sink", () => {

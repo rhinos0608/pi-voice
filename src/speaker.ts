@@ -371,19 +371,22 @@ const MS_PER_BYTE = 1000 / (SPEAKER_SAMPLE_RATE * 2);
  * Gate wake audio against the enrolled profile. The caller pushes only
  * speech-flagged s16le 16 kHz PCM. Audio accumulates until minSpeechMs
  * (default 1200), at which point the head window is embedded once.
- * An early "reject" is terminal and aborts the utterance immediately.
- * An early "accept" is provisional: speech keeps accumulating and
- * finalize() re-scores whenever speech arrived since the last scoring, so
- * the final verdict (and learning) reflects the whole utterance, including
- * speech that resumed after a pause. finalize() never returns a verdict
- * computed on stale audio.
+ * A mid-utterance verdict is provisional until EARLY_DECISION_MS (2500 ms)
+ * of VAD speech: an early "accept" never aborts anything, and an early
+ * "reject" is terminal only when the score is far below the gate (score <
+ * threshold - EARLY_REJECT_MARGIN). Anything less certain reports
+ * "pending" mid-utterance so a genuine-but-noisy short segment cannot
+ * abort the utterance. finalize() re-scores whenever speech arrived since
+ * the last scoring, so the final verdict (and learning) reflects the whole
+ * utterance, including speech that resumed after a pause. finalize() never
+ * returns a verdict computed on stale audio.
  *
  * Two windows are scored: the head (the first maxSpeechMs of speech, which
  * is also the only window ever offered for learning) and, when the utterance
  * holds more than maxSpeechMs, the tail (the most recent maxSpeechMs). The
- * final decision is reject when either window rejects. finalize() embeds
- * whatever exists below minSpeechMs (< 600 ms of audio is "insufficient"
- * without embedding).
+ * final decision is reject when either window rejects. Utterances with
+ * less than INSUFFICIENT_SPEECH_MS (1500 ms) of speech stay "insufficient"
+ * without embedding: they proceed, but are never learned.
  *
  * Embedding budget: at most 6 embeddings per utterance. Measured 2026-10-04
  * against the cached CAM++ model (3D-Speaker, dim 512) via sherpa-onnx:
@@ -397,7 +400,7 @@ const MS_PER_BYTE = 1000 / (SPEAKER_SAMPLE_RATE * 2);
  */
 export function createSpeakerGate(opts: SpeakerGateOptions): SpeakerGate {
   const minSpeechMs = opts.minSpeechMs ?? 1200;
-  const maxSpeechMs = opts.maxSpeechMs ?? 3000;
+  const maxSpeechMs = opts.maxSpeechMs ?? 4000;
   const MAX_EMBEDS = 6;
   let chunks: Buffer[] = [];
   let bytes = 0;
@@ -433,7 +436,12 @@ export function createSpeakerGate(opts: SpeakerGateOptions): SpeakerGate {
     return { decision: "reject", reason: "unverified", speechMs: headWindowMs() };
   }
   function terminalReject(): boolean {
-    return failedClosed || head?.verdict === "reject" || tail?.verdict === "reject";
+    if (failedClosed || tail?.verdict === "reject") return true;
+    if (head?.verdict !== "reject") return false;
+    // Before EARLY_DECISION_MS of speech only a far-below score rejects
+    // terminally; a borderline short-window reject stays provisional.
+    const headMs = head.windowBytes * MS_PER_BYTE;
+    return headMs >= EARLY_DECISION_MS || (head.score as number) < opts.threshold - EARLY_REJECT_MARGIN;
   }
 
   // Score the windows that grew since the last scoring. A repeat finalize
@@ -463,19 +471,20 @@ export function createSpeakerGate(opts: SpeakerGateOptions): SpeakerGate {
 
   function result(): SpeakerGateResult {
     if (failedClosed) return { decision: "reject", reason: "unverified", speechMs: headWindowMs() };
-    if (head?.verdict === "reject") return rejected(head);
-    if (tail?.verdict === "reject") return rejected(tail);
-    if (head === undefined) {
-      // Not enough speech to score: report insufficient without embedding.
-      if (speechMs() < 600) return { decision: "insufficient", speechMs: speechMs() };
-      return scoreFresh();
-    }
+    // Below INSUFFICIENT_SPEECH_MS only a terminal (far-below) reject
+    // decides; anything else stays "insufficient" without embedding, so a
+    // noisy short window can neither reject nor seed learning.
+    if (!terminalReject() && speechMs() < INSUFFICIENT_SPEECH_MS)
+      return { decision: "insufficient", speechMs: speechMs() };
+    if (head === undefined) return scoreFresh();
     const needHead = head.windowBytes < headWindowBytes();
     const needTail = bytes > maxBytes && (tail === undefined || tail.total !== bytes);
-    if (!needHead && !needTail) {
-      return { decision: head.verdict, score: head.score, speechMs: headWindowMs(), embedding: head.embedding };
-    }
-    return scoreFresh();
+    // Stale windows re-score first: the final verdict always reflects all
+    // accumulated speech, never a provisional short-window score.
+    if (needHead || needTail) return scoreFresh();
+    if (head.verdict === "reject") return rejected(head);
+    if (tail?.verdict === "reject") return rejected(tail);
+    return { decision: head.verdict, score: head.score, speechMs: headWindowMs(), embedding: head.embedding };
   }
 
   return {
@@ -493,9 +502,11 @@ export function createSpeakerGate(opts: SpeakerGateOptions): SpeakerGate {
       head = { ...scored, windowBytes: headWindowBytes() };
     },
     decision(): "accept" | "reject" | "pending" {
+      // Mid-utterance only a terminal reject aborts: a borderline reject on
+      // a short window stays provisional ("pending") until finalize().
       if (terminalReject()) return "reject";
       if (head === undefined) return "pending";
-      return head.verdict;
+      return head.verdict === "accept" ? "accept" : "pending";
     },
     finalize(): SpeakerGateResult {
       return result();
@@ -574,6 +585,33 @@ function anchorsOf(profile: SpeakerProfile): number[][] {
   if (profile.anchors !== undefined && profile.anchors.length > 0) return profile.anchors;
   return [profile.centroid];
 }
+
+/**
+ * Score one utterance embedding for `/voice test speaker`: the same
+ * scoreSample semantics the gate enforces, so the test command previews the
+ * real verdict instead of a raw centroid cosine. Pure.
+ */
+export function scoreUtterance(profile: SpeakerProfile, embedding: Float32Array): number {
+  return scoreSample(profile, embedding);
+}
+
+/**
+ * Short-utterance speaker verification degrades steeply below ~2-3 s of
+ * speech (ECAPA EER 1.05% at 5 s -> 1.76% at 2 s -> 3.04% at 1 s, GIST
+ * 2023 Table 1; CAM++ trains on 3 s crops, arXiv:2303.00332). A 1.2 s
+ * window can score a genuine owner well under their own threshold, so a
+ * reject before EARLY_DECISION_MS of VAD speech is only terminal when the
+ * score is far below the gate (score < threshold - EARLY_REJECT_MARGIN).
+ * Anything less certain stays provisional ("pending") until the
+ * end-of-speech re-score over all accumulated audio.
+ */
+export const EARLY_DECISION_MS = 2500;
+
+/** Margin below the accept threshold that still rejects early. Documented provisional: re-calibrate on the owner's real voice. */
+export const EARLY_REJECT_MARGIN = 0.15;
+
+/** Utterances with less than this much VAD speech stay "insufficient" (proceed, never learned). */
+export const INSUFFICIENT_SPEECH_MS = 1500;
 
 function normalizedMeanVecs(vecs: number[][]): number[] {
   const dim = vecs[0]!.length;

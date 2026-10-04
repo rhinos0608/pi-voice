@@ -20,6 +20,7 @@ import {
   resetLearning,
   saveSpeakerProfile,
   scoreSample,
+  scoreUtterance,
   SPEAKER_THRESHOLDS,
   suggestedThresholdFor,
   type SpeakerExtractorLike,
@@ -260,7 +261,7 @@ describe("createSpeakerGate", () => {
     const gate = gateWith(new Float32Array([1, 0]));
     gate.push(pcmOf(0.5));
     assert.equal(gate.decision(), "pending");
-    gate.push(pcmOf(0.7));
+    gate.push(pcmOf(1.0)); // 1.5 s total clears the 1500 ms insufficient floor
     assert.equal(gate.decision(), "accept");
     assert.equal(gate.finalize().decision, "accept");
   });
@@ -293,17 +294,35 @@ describe("createSpeakerGate", () => {
     assert.ok(calls <= 6, `expected at most 6 embeddings, got ${calls}`);
   });
 
-  it("finalize scores short audio and reports insufficient below 600 ms", () => {
-    const short = gateWith(new Float32Array([1, 0]));
-    short.push(pcmOf(0.3));
-    assert.equal(short.finalize().decision, "insufficient");
+  it("finalize reports insufficient below 1500 ms without embedding", () => {
+    const tiny = gateWith(new Float32Array([1, 0]));
+    tiny.push(pcmOf(0.3));
+    assert.equal(tiny.finalize().decision, "insufficient");
 
-    const mid = gateWith(new Float32Array([1, 0]));
+    // 0.8 s of even matching speech is still insufficient: it proceeds but
+    // is never scored, so it can never seed learning.
+    let calls = 0;
+    const mid = createSpeakerGate({
+      embed: (_pcm: Buffer): Float32Array => {
+        calls += 1;
+        return new Float32Array([1, 0]);
+      },
+      profile: { ...PROFILE, dim: 2, centroid: [1, 0] },
+      threshold: 0.7,
+    });
     mid.push(pcmOf(0.8));
     const out = mid.finalize();
-    assert.equal(out.decision, "accept");
-    assert.ok(out.score !== undefined && out.score > 0.99);
+    assert.equal(out.decision, "insufficient");
+    assert.equal(out.embedding, undefined);
+    assert.equal(calls, 0);
     assert.ok(out.speechMs > 700 && out.speechMs < 900);
+
+    const enough = gateWith(new Float32Array([1, 0]));
+    enough.push(pcmOf(2.0));
+    const done = enough.finalize();
+    assert.equal(done.decision, "accept");
+    assert.ok(done.score !== undefined && done.score > 0.99);
+    assert.ok(done.speechMs > 1900 && done.speechMs < 2100);
   });
 
   it("reset clears the verdict so the gate can be reused", () => {
@@ -395,10 +414,10 @@ describe("speaker gate provisional accept", () => {
   it("caps learned speech at the head window with at most 6 embeddings", () => {
     const calls = { n: 0 };
     const gate = gateWithCalls(calls);
-    for (let i = 0; i < 8; i++) gate.push(pcmOf(0.5)); // 4 s offered, 3 s head window
+    for (let i = 0; i < 8; i++) gate.push(pcmOf(0.5)); // 4 s offered, 4 s head window
     const done = gate.finalize();
     assert.equal(done.decision, "accept");
-    assert.ok(done.speechMs > 2900 && done.speechMs <= 3100, `speechMs ${done.speechMs} should cap at ~3000`);
+    assert.ok(done.speechMs > 3900 && done.speechMs <= 4100, `speechMs ${done.speechMs} should cap at ~4000`);
     gate.finalize();
     assert.ok(calls.n <= 6, `expected at most 6 embeddings, got ${calls.n}`);
   });
@@ -422,7 +441,7 @@ describe("speaker gate provisional accept", () => {
   it("resume/finalize cycles always reflect the newest speech", () => {
     const calls = { n: 0 };
     const gate = gateWithCalls(calls);
-    gate.push(pcmOf(1.25, 1000));
+    gate.push(pcmOf(1.5, 1000));
     assert.equal(gate.finalize().decision, "accept");
     const afterFirst = calls.n;
     gate.push(pcmOf(0.5, 1000));
@@ -440,7 +459,7 @@ describe("speaker gate provisional accept", () => {
   it("fails closed with reason unverified once the 6-embedding budget is spent", () => {
     const calls = { n: 0 };
     const gate = gateWithCalls(calls);
-    gate.push(pcmOf(1.2, 1000)); // early accept, first embedding
+    gate.push(pcmOf(1.5, 1000)); // early accept, first embedding
     assert.equal(gate.decision(), "accept");
     let last = gate.finalize(); // no new speech: no new embedding
     assert.equal(last.decision, "accept");
@@ -470,15 +489,94 @@ describe("speaker gate provisional accept", () => {
       profile: profileOf(),
       threshold: 0.7,
     });
-    for (let i = 0; i < 8; i++) gate.push(pcmOf(0.5, 1000 + i)); // 4 s, values 1000..1007
+    for (let i = 0; i < 9; i++) gate.push(pcmOf(0.5, 1000 + i)); // 4.5 s, values 1000..1008
     const done = gate.finalize();
     assert.equal(done.decision, "accept");
-    assert.ok(done.speechMs > 2900 && done.speechMs <= 3100, `speechMs ${done.speechMs} should cap at ~3000`);
+    assert.ok(done.speechMs > 3900 && done.speechMs <= 4100, `speechMs ${done.speechMs} should cap at ~4000`);
     assert.ok(seen.length <= 6, `expected at most 6 embeddings, got ${seen.length}`);
-    const head = seen.find((s) => s.len === 96000 && s.first === 1000);
-    const tail = seen.find((s) => s.len === 96000 && s.last === 1007);
+    const head = seen.find((s) => s.len === 128000 && s.first === 1000);
+    const tail = seen.find((s) => s.len === 128000 && s.last === 1008);
     assert.ok(head !== undefined, `expected a scored head window, got ${JSON.stringify(seen)}`);
     assert.ok(tail !== undefined, `expected a scored tail window, got ${JSON.stringify(seen)}`);
+  });
+});
+
+describe("short-utterance provisional gate", () => {
+  // Owner real-voice enrollment is noisy (self-cosine 0.35-0.76), so a
+  // genuine-but-noisy short segment can score just under the gate while a
+  // clearly different speaker scores far below it.
+  const THRESHOLD = 0.53;
+  const prof = (): SpeakerProfile => ({ ...PROFILE, dim: 2, centroid: [1, 0] });
+  const NOISY = new Float32Array([0.5, Math.sqrt(0.75)]); // cosine 0.5 to the centroid
+  const OWNER = new Float32Array([1, 0]);
+  const IMPOSTOR = new Float32Array([0, 1]); // cosine 0 to the centroid
+
+  it("scoreUtterance uses scoreSample semantics", () => {
+    const profile = prof();
+    assert.equal(scoreUtterance(profile, OWNER), scoreSample(profile, OWNER));
+    assert.equal(scoreUtterance(profile, NOISY), scoreSample(profile, NOISY));
+    assert.equal(scoreUtterance(profile, IMPOSTOR), scoreSample(profile, IMPOSTOR));
+  });
+
+  it("a genuine-but-noisy early segment is not rejected and accepts at end", () => {
+    let calls = 0;
+    const gate = createSpeakerGate({
+      profile: prof(),
+      threshold: THRESHOLD,
+      // First (1.2 s) window is noisy; the full-utterance re-score is clean.
+      embed: (_pcm: Buffer): Float32Array => {
+        calls += 1;
+        return (calls === 1 ? NOISY : OWNER).slice();
+      },
+    });
+    gate.push(pcmOf(1.2));
+    assert.equal(gate.decision(), "pending");
+    gate.push(pcmOf(1.8)); // 3.0 s total
+    const done = gate.finalize();
+    assert.equal(done.decision, "accept");
+    assert.ok(done.score !== undefined && done.score >= THRESHOLD);
+    assert.ok(calls <= 6, `expected at most 6 embeddings, got ${calls}`);
+  });
+
+  it("a clearly different speaker still rejects early", () => {
+    let calls = 0;
+    const gate = createSpeakerGate({
+      profile: prof(),
+      threshold: THRESHOLD,
+      embed: (_pcm: Buffer): Float32Array => {
+        calls += 1;
+        return IMPOSTOR.slice();
+      },
+    });
+    gate.push(pcmOf(1.2));
+    assert.equal(gate.decision(), "reject");
+    assert.equal(gate.finalize().decision, "reject");
+    assert.ok(calls <= 6, `expected at most 6 embeddings, got ${calls}`);
+  });
+
+  it("short utterances are insufficient and never learned", () => {
+    let calls = 0;
+    const gate = createSpeakerGate({
+      profile: prof(),
+      threshold: THRESHOLD,
+      embed: (_pcm: Buffer): Float32Array => {
+        calls += 1;
+        return OWNER.slice();
+      },
+    });
+    gate.push(pcmOf(0.8));
+    const done = gate.finalize();
+    assert.equal(done.decision, "insufficient");
+    assert.equal(done.embedding, undefined);
+    assert.equal(calls, 0);
+    const res = adaptProfile(prof(), {
+      embedding: OWNER,
+      score: 1,
+      speechMs: done.speechMs,
+      threshold: THRESHOLD,
+    });
+    assert.equal(res.adapted, false);
+    assert.equal(res.reason, "too-short");
   });
 });
 
@@ -768,9 +866,14 @@ describe("online learning", () => {
     assert.ok(cosineSimilarity(impostor, anchorMean) < original.suggestedThreshold);
     const gateVerdict = (profile: SpeakerProfile): string => {
       const gate = createSpeakerGate({ profile, threshold: 0.8, embed: (_buf: Buffer) => impostor });
+      // 3 s: past the early-decision floor, so the FINAL verdict (not a
+      // provisional short-window reject) decides. A near-threshold impostor
+      // must never abort mid-utterance on a noisy 1.2 s window alone.
       gate.push(pcmOf(1));
       gate.push(pcmOf(1));
-      return gate.decision();
+      gate.push(pcmOf(1));
+      assert.equal(gate.decision(), "pending");
+      return gate.finalize().decision;
     };
     assert.equal(gateVerdict(original), "reject");
     let profile = original;

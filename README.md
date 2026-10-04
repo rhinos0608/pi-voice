@@ -134,9 +134,14 @@ the session. Notes:
   `xcode-select --install`.
 
 **Owner-voice check (speaker).** `/voice enroll` records
-a short guided enrollment (5 varied phrases shown one at a time, ~1.5 s of
-speech each, up to ~6 s per phrase; too-short takes are repeated) and stores a
-numeric voice profile. Later utterances are scored against it: strangers hear
+a guided enrollment (6 longer sentences shown one at a time, each needing
+at least 2.5 s of speech — aim for 3+ s per clip, ~15–20 s total; too-short
+takes are repeated) and stores a
+numeric voice profile. Each clip is embedded as you read it: once 3 clips
+exist, a clip whose mean cosine similarity to the others is below 0.60
+(provisional) is flagged and you are asked to re-record it (up to 2 retries
+per phrase). At the end the pairwise clip-similarity matrix is summarized
+(mean/min). Later utterances are scored against the profile: strangers hear
 an error cue and a brief `🎙 not your voice`, and nothing is submitted (in
 review mode, nothing lands in the editor either).
 
@@ -214,6 +219,16 @@ enrollment audio lives only in memory and is never written to disk. Delete
   `/voice test wake` to check detection without submitting anything.
 - **STT issues:** run `/voice test stt` and speak; it reports the transcript
   and commit→transcript latency, or the failure cause.
+- **Re-enroll after this update.** Enrollment now needs 6 clips of 2.5+ s
+  speech each with outlier re-recording; profiles enrolled under the old
+  short-phrase flow (5 × ~1.5 s) under-represent your voice and should be
+  replaced via `/voice enroll`.
+- **What the pairwise numbers mean.** After enrollment you see a per-clip mean
+  similarity plus a final `Pairwise clip similarity: mean X, min Y`.
+  Consistent enrollments sit well above 0.60 per clip. If the final mean is
+  below 0.65, the audio path may be degraded (room noise, mic gain, wrong
+  device) — re-enroll somewhere quieter, preferably with a headset, or run
+  `research/speaker-diag/diag.mjs` to diagnose.
 - **Pipeline trace:** `PI_VOICE_DEBUG=1` writes a redacted JSONL log to
   `~/Library/Application Support/pi-voice/debug.jsonl` (keys and secret-like
   values redacted, 1 MB rotation). Restart Pi after exporting it.
@@ -229,4 +244,4 @@ enrollment audio lives only in memory and is never written to disk. Delete
 5. `/voice off` → `voice off`, mic process gone (`pgrep ffmpeg` empty).
 6. Restart Pi with autostart on → listening resumes without downloading.
 7. `/voice setup` → builds the voice-isolation helper (needs Xcode command line tools) and provisions the speaker model, reporting each result.
-8. `/voice enroll` → reads back 5 phrases, then reports scores and the threshold; `/voice test speaker` → score vs threshold, nothing submitted.
+8. `/voice enroll` → reads back 6 sentences, flags outliers for re-recording, then reports scores, the pairwise summary, and the threshold; `/voice test speaker` → score vs threshold, nothing submitted.
