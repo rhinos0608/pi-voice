@@ -937,6 +937,13 @@ export class VoiceController {
   private onFinal(text: string, gen: number): void {
     if (this.closed || gen !== this.generation) return;
     if (this.submitted) return;
+    // Every transcript path (final, partial fallback via stt.ts direct
+    // onFinal or onEnd, review staging, send intents) settles the same
+    // gate: pending finalizes here (VAD end already settled when it ran),
+    // reject runs the existing reject handling with nothing submitted,
+    // accept/insufficient proceed. Must run before submitted is marked:
+    // settle is a no-op once submitted.
+    if (!this.settleSpeakerGate("end")) return;
     this.submitted = true;
     this.clearNoSpeechTimer();
     this.closeEndpointer();

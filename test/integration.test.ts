@@ -1145,6 +1145,42 @@ describe("speaker gate", () => {
     }
   });
 
+  it("partial-fallback onEnd from a non-owner submits nothing", async () => {
+    const h = makeHarness({});
+    // Gate stays pending during capture (no VAD end); finalize rejects.
+    armGate(h, { accept: true, evaluateAfterPushes: 100, finalDecision: "reject", finalScore: 0.4 });
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.utterances[0].handlers.onEnd!({ reason: "final", text: "fallback impostor words", source: "partial-fallback" });
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.controller.getPhase(), "wake");
+    assert.ok(h.logs.some((l) => l.event === "speaker" && l.data?.["decision"] === "reject"));
+    // Late final from the rejected utterance never submits either.
+    h.utterances[0].handlers.onFinal("fallback impostor words");
+    assert.equal(h.host.sent.length, 0);
+  });
+
+  it("partial-fallback direct onFinal from a non-owner submits nothing", async () => {
+    const h = makeHarness({});
+    armGate(h, { accept: true, evaluateAfterPushes: 100, finalDecision: "reject", finalScore: 0.4 });
+    await h.controller.start();
+    h.detectors[0].fire();
+    // stt.ts partial fallback calls onFinal directly before onEnd.
+    h.utterances[0].handlers.onFinal("fallback impostor words");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.controller.getPhase(), "wake");
+  });
+
+  it("review-mode staging from a non-owner appends nothing", async () => {
+    const h = makeHarness({ prefs: { sendMode: "review" } });
+    armGate(h, { accept: true, evaluateAfterPushes: 100, finalDecision: "reject", finalScore: 0.4 });
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.utterances[0].handlers.onFinal("staged impostor words");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.host.editor, "");
+  });
+
   it("embedding runs at evaluation, not on every frame", async () => {
     const h = makeHarness({});
     const state = armGate(h, { accept: true, evaluateAfterPushes: 3 });
