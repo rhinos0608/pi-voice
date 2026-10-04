@@ -1,0 +1,40 @@
+{"file":"wav/u01_daniel.wav","model":"scribe_v2","latency_s":1.047803125,"text":"Run npm test and fix the failing TypeScript errors in src/controller.ts","lang":"eng"}
+{"file":"wav/u01_samantha.wav","model":"scribe_v2","latency_s":1.04188175,"text":"Run npm test and fix the failing TypeScript errors in src/controller.ts","lang":"eng"}
+{"file":"wav/u02_daniel.wav","model":"scribe_v2","latency_s":0.7623137079999996,"text":"Rename the useState hook in the settings panel","lang":"eng"}
+{"file":"wav/u02_samantha.wav","model":"scribe_v2","latency_s":0.8918494999999999,"text":"Rename the useState hook in the settings panel","lang":"eng"}
+{"file":"wav/u03_daniel.wav","model":"scribe_v2","latency_s":1.0621490840000005,"text":"Add a pnpm workspace for the Sherpa ONNX package","lang":"eng"}
+{"file":"wav/u03_samantha.wav","model":"scribe_v2","latency_s":1.0221607919999998,"text":"Add a pnpm workspace for the Sherpa ONNX package","lang":"eng"}
+{"file":"wav/u04_daniel.wav","model":"scribe_v2","latency_s":1.0423794580000003,"text":"Check git status and commit with message fix VAD end pointing","lang":"eng"}
+{"file":"wav/u04_samantha.wav","model":"scribe_v2","latency_s":0.8041569170000002,"text":"Check git status and commit with message fix VAD end pointing","lang":"eng"}
+{"file":"wav/u05_daniel.wav","model":"scribe_v2","latency_s":0.7995362080000005,"text":"Scale the kube-anets deployment with kubectl and watch the pods restart","lang":"eng"}
+{"file":"wav/u05_samantha.wav","model":"scribe_v2","latency_s":0.7419198749999996,"text":"Scale the Kubernetes deployment with kubectl and watch the pods restart","lang":"eng"}
+{"file":"wav/u06_daniel.wav","model":"scribe_v2","latency_s":0.9981260840000014,"text":"Rewrite the decur file to cache the pnpm store between builds","lang":"eng"}
+{"file":"wav/u06_samantha.wav","model":"scribe_v2","latency_s":0.7422772920000007,"text":"Rewrite the decur file to cache the pnpm store between builds","lang":"eng"}
+{"file":"wav/u07_daniel.wav","model":"scribe_v2","latency_s":0.8294412919999995,"text":"Migrate the Postgres schema and backfill the Redis cache","lang":"eng"}
+{"file":"wav/u07_samantha.wav","model":"scribe_v2","latency_s":0.7734071249999998,"text":"Migrate the Postgres schema and backfill the Redis cache","lang":"eng"}
+{"file":"wav/u08_daniel.wav","model":"scribe_v2","latency_s":0.7560996670000004,"text":"Add a graphical resolver with a sync await and proper error handling","lang":"eng"}
+{"file":"wav/u08_samantha.wav","model":"scribe_v2","latency_s":0.7709562500000011,"text":"Add a graphical resolver with async await and proper error handling","lang":"eng"}
+{"file":"wav/u09_daniel.wav","model":"scribe_v2","latency_s":1.1930137909999994,"text":"Debug the regex that parses JSON lines from stdout","lang":"eng"}
+{"file":"wav/u09_samantha.wav","model":"scribe_v2","latency_s":0.8035110839999997,"text":"Debug the regex that parses JSON lines from stdout","lang":"eng"}
+{"file":"wav/u10_daniel.wav","model":"scribe_v2","latency_s":0.6543823750000011,"text":"Update the YAML config and rerun ESLint on the Vite bundle","lang":"eng"}
+{"file":"wav/u10_samantha.wav","model":"scribe_v2","latency_s":0.8153763340000005,"text":"Update the YAML config and rerun ESLint on the Vite bundle","lang":"eng"}
+{"file":"wav/u11_daniel.wav","model":"scribe_v2","latency_s":0.8316246250000003,"text":"Tune the WebRTC jitter buffer and re-encode with FFMPEG","lang":"eng"}
+{"file":"wav/u11_samantha.wav","model":"scribe_v2","latency_s":0.8484252919999999,"text":"Tune the WebRTC jitter buffer and re-encode with FFmpeg","lang":"eng"}
+{"file":"wav/u12_daniel.wav","model":"scribe_v2","latency_s":1.2054804170000024,"text":"chmod +x the deploy script, then SSH into localhost","lang":"eng"}
+{"file":"wav/u12_samantha.wav","model":"scribe_v2","latency_s":0.8401369579999991,"text":"chmod +x the deploy script, then SSH into localhost","lang":"eng"}
+{"file":"wav/u13_daniel.wav","model":"scribe_v2","latency_s":1.2835034579999993,"text":"Rotate the OAuth secrets and reissue the JWT tokens","lang":"eng"}
+{"file":"wav/u13_samantha.wav","model":"scribe_v2","latency_s":0.7373094579999997,"text":"Rotate the O of secrets and reissue the JWT tokens","lang":"eng"}
+{"file":"wav/u14_daniel.wav","model":"scribe_v2","latency_s":0.625771249999998,"text":"Open a WebSocket to the Svelte-backed chat server through Minx","lang":"eng"}
+{"file":"wav/u14_samantha.wav","model":"scribe_v2","latency_s":0.9171545000000005,"text":"Open a WebSocket to the Sklye-backed chat server through Ngix","lang":"eng"}
+{"file":"wav/u15_daniel.wav","model":"scribe_v2","latency_s":1.3603395420000015,"text":"Fix the cause headers and the DOM reflow in the CSS grid","lang":"eng"}
+{"file":"wav/u15_samantha.wav","model":"scribe_v2","latency_s":2.5532255829999992,"text":"Fix the course headers and the DOM reflow in the CSS grid","lang":"eng"}
+{"file":"wav/u16_daniel.wav","model":"scribe_v2","latency_s":1.2921276660000003,"text":"Greps there for the stack trace and curl the tarball","lang":"eng"}
+{"file":"wav/u16_samantha.wav","model":"scribe_v2","latency_s":0.9481412079999972,"text":"Greps there for the stack trace and curl the tarball","lang":"eng"}
+{"file":"wav/u17_daniel.wav","model":"scribe_v2","latency_s":0.8740777909999997,"text":"Split the monorepo and run the linter on the SDK package","lang":"eng"}
+{"file":"wav/u17_samantha.wav","model":"scribe_v2","latency_s":1.0463355419999971,"text":"Split the monorepo and run the linter on the SDK package","lang":"eng"}
+{"file":"wav/u18_daniel.wav","model":"scribe_v2","latency_s":0.8362740409999969,"text":"Refactor the Klee to stream NDJSON over the API gateway","lang":"eng"}
+{"file":"wav/u18_samantha.wav","model":"scribe_v2","latency_s":0.8517062910000023,"text":"Refactor the CLI to stream NDJSON over the API gateway","lang":"eng"}
+{"file":"wav/u19_daniel.wav","model":"scribe_v2","latency_s":0.8573384159999987,"text":"Set a breakpoint in the async queue worker and inspect the GUI state","lang":"eng"}
+{"file":"wav/u19_samantha.wav","model":"scribe_v2","latency_s":0.7022692920000045,"text":"Set a breakpoint in the async queue worker and inspect the GUI state","lang":"eng"}
+{"file":"wav/u20_daniel.wav","model":"scribe_v2","latency_s":0.855768250000001,"text":"Bump the cron schedule and archive the S3 logs to Glacier","lang":"eng"}
+{"file":"wav/u20_samantha.wav","model":"scribe_v2","latency_s":0.6793215000000055,"text":"Bump the cron schedule and archive the S3 logs to Glacier","lang":"eng"}

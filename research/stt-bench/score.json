@@ -1,0 +1,358 @@
+{
+  "agg": {
+    "apple:transcribe | daniel | noisy": {
+      "n": 20,
+      "meanWER": 0.422043512043512,
+      "techAcc": 0.3114754098360656,
+      "meanLatencyS": 0.17945329546928407
+    },
+    "apple:transcribe | daniel | clean": {
+      "n": 20,
+      "meanWER": 0.2902253302253302,
+      "techAcc": 0.39344262295081966,
+      "meanLatencyS": 0.17949893474578857
+    },
+    "apple:transcribe | samantha | noisy": {
+      "n": 20,
+      "meanWER": 0.30514957264957265,
+      "techAcc": 0.4098360655737705,
+      "meanLatencyS": 0.17325315475463868
+    },
+    "apple:transcribe | samantha | clean": {
+      "n": 20,
+      "meanWER": 0.25889665889665886,
+      "techAcc": 0.47540983606557374,
+      "meanLatencyS": 0.17686184644699096
+    },
+    "apple:dictation | daniel | noisy": {
+      "n": 20,
+      "meanWER": 0.5760392385392386,
+      "techAcc": 0.16393442622950818,
+      "meanLatencyS": 0.7740387082099914
+    },
+    "apple:dictation | daniel | clean": {
+      "n": 20,
+      "meanWER": 0.4591297591297591,
+      "techAcc": 0.2786885245901639,
+      "meanLatencyS": 0.46240519881248476
+    },
+    "apple:dictation | samantha | noisy": {
+      "n": 20,
+      "meanWER": 0.4014704739704739,
+      "techAcc": 0.26229508196721313,
+      "meanLatencyS": 0.48132219910621643
+    },
+    "apple:dictation | samantha | clean": {
+      "n": 20,
+      "meanWER": 0.334071484071484,
+      "techAcc": 0.36065573770491804,
+      "meanLatencyS": 0.3888221561908722
+    },
+    "apple:context | daniel | noisy": {
+      "n": 20,
+      "meanWER": 0.422043512043512,
+      "techAcc": 0.3114754098360656,
+      "meanLatencyS": 0.17459024786949157
+    },
+    "apple:context | daniel | clean": {
+      "n": 20,
+      "meanWER": 0.2902253302253302,
+      "techAcc": 0.39344262295081966,
+      "meanLatencyS": 0.16868860125541688
+    },
+    "apple:context | samantha | noisy": {
+      "n": 20,
+      "meanWER": 0.30514957264957265,
+      "techAcc": 0.4098360655737705,
+      "meanLatencyS": 0.16467809677124023
+    },
+    "apple:context | samantha | clean": {
+      "n": 20,
+      "meanWER": 0.25889665889665886,
+      "techAcc": 0.47540983606557374,
+      "meanLatencyS": 0.1672092080116272
+    },
+    "elevenlabs:scribe_v2 | daniel | clean": {
+      "n": 20,
+      "meanWER": 0.08265151515151516,
+      "techAcc": 0.819672131147541,
+      "meanLatencyS": 0.9583775124
+    },
+    "elevenlabs:scribe_v2 | samantha | clean": {
+      "n": 20,
+      "meanWER": 0.07058080808080808,
+      "techAcc": 0.8524590163934426,
+      "meanLatencyS": 0.9265761271500003
+    }
+  },
+  "worst": {
+    "apple:transcribe": [
+      {
+        "engine": "apple:transcribe",
+        "mode": "file",
+        "id": "u09",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.8888888888888888,
+        "techHit": 0,
+        "techN": 3,
+        "text": "The bugger rejects that pauses the same lines from sit down.",
+        "wall_s": 0.15880000591278076,
+        "eoa": null
+      },
+      {
+        "engine": "apple:transcribe",
+        "mode": "file",
+        "id": "u16",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.7,
+        "techHit": 1,
+        "techN": 6,
+        "text": "Gret's bare for the stacked trace and pel the tar ball.",
+        "wall_s": 0.1530590057373047,
+        "eoa": null
+      },
+      {
+        "engine": "apple:transcribe",
+        "mode": "file",
+        "id": "u07",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.6666666666666666,
+        "techHit": 0,
+        "techN": 2,
+        "text": "Migrate the post because female and backbuilder are disk cache.",
+        "wall_s": 0.15488696098327637,
+        "eoa": null
+      },
+      {
+        "engine": "apple:transcribe",
+        "mode": "file",
+        "id": "u14",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.6363636363636364,
+        "techHit": 0,
+        "techN": 3,
+        "text": "Opener with soccer to the slight back chat server proof games.",
+        "wall_s": 0.16457998752593994,
+        "eoa": null
+      },
+      {
+        "engine": "apple:transcribe",
+        "mode": "file",
+        "id": "u07",
+        "voice": "daniel",
+        "cond": "clean",
+        "wer": 0.5555555555555556,
+        "techHit": 0,
+        "techN": 2,
+        "text": "Migrate the post gers, schema and backfill are a disk cache.",
+        "wall_s": 0.16687405109405518,
+        "eoa": null
+      }
+    ],
+    "apple:dictation": [
+      {
+        "engine": "apple:dictation",
+        "mode": "file",
+        "id": "u07",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 1,
+        "techHit": 0,
+        "techN": 2,
+        "text": "My great the post goes steam and back builder a cash",
+        "wall_s": 1.0338380336761475,
+        "eoa": null
+      },
+      {
+        "engine": "apple:dictation",
+        "mode": "file",
+        "id": "u07",
+        "voice": "daniel",
+        "cond": "clean",
+        "wer": 1,
+        "techHit": 0,
+        "techN": 2,
+        "text": "My grade, the posters steamer and backfield are a disc cash",
+        "wall_s": 0.5524049997329712,
+        "eoa": null
+      },
+      {
+        "engine": "apple:dictation",
+        "mode": "file",
+        "id": "u10",
+        "voice": "daniel",
+        "cond": "clean",
+        "wer": 0.8181818181818182,
+        "techHit": 0,
+        "techN": 3,
+        "text": "Not vaguely Yamel configured resent on the white bun",
+        "wall_s": 0.48702704906463623,
+        "eoa": null
+      },
+      {
+        "engine": "apple:dictation",
+        "mode": "file",
+        "id": "u18",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.8,
+        "techHit": 0,
+        "techN": 3,
+        "text": "Refer to the police screen and JSO and over the AAPI Gateway",
+        "wall_s": 1.4758180379867554,
+        "eoa": null
+      },
+      {
+        "engine": "apple:dictation",
+        "mode": "file",
+        "id": "u09",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.7777777777777778,
+        "techHit": 0,
+        "techN": 3,
+        "text": "The bug the rejects that causes just limes from down",
+        "wall_s": 0.7902899980545044,
+        "eoa": null
+      }
+    ],
+    "apple:context": [
+      {
+        "engine": "apple:context",
+        "mode": "file",
+        "id": "u09",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.8888888888888888,
+        "techHit": 0,
+        "techN": 3,
+        "text": "The bugger rejects that pauses the same lines from sit down.",
+        "wall_s": 0.15159106254577637,
+        "eoa": null
+      },
+      {
+        "engine": "apple:context",
+        "mode": "file",
+        "id": "u16",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.7,
+        "techHit": 1,
+        "techN": 6,
+        "text": "Gret's bare for the stacked trace and pel the tar ball.",
+        "wall_s": 0.15671098232269287,
+        "eoa": null
+      },
+      {
+        "engine": "apple:context",
+        "mode": "file",
+        "id": "u07",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.6666666666666666,
+        "techHit": 0,
+        "techN": 2,
+        "text": "Migrate the post because female and backbuilder are disk cache.",
+        "wall_s": 0.1628270149230957,
+        "eoa": null
+      },
+      {
+        "engine": "apple:context",
+        "mode": "file",
+        "id": "u14",
+        "voice": "daniel",
+        "cond": "noisy",
+        "wer": 0.6363636363636364,
+        "techHit": 0,
+        "techN": 3,
+        "text": "Opener with soccer to the slight back chat server proof games.",
+        "wall_s": 0.1465139389038086,
+        "eoa": null
+      },
+      {
+        "engine": "apple:context",
+        "mode": "file",
+        "id": "u07",
+        "voice": "daniel",
+        "cond": "clean",
+        "wer": 0.5555555555555556,
+        "techHit": 0,
+        "techN": 2,
+        "text": "Migrate the post gers, schema and backfill are a disk cache.",
+        "wall_s": 0.1667490005493164,
+        "eoa": null
+      }
+    ],
+    "elevenlabs:scribe_v2": [
+      {
+        "engine": "elevenlabs:scribe_v2",
+        "mode": "batch",
+        "id": "u08",
+        "voice": "daniel",
+        "cond": "clean",
+        "wer": 0.2727272727272727,
+        "techHit": 1,
+        "techN": 3,
+        "text": "Add a graphical resolver with a sync await and proper error handling",
+        "wall_s": 0.7560996670000004,
+        "eoa": null
+      },
+      {
+        "engine": "elevenlabs:scribe_v2",
+        "mode": "batch",
+        "id": "u13",
+        "voice": "samantha",
+        "cond": "clean",
+        "wer": 0.2222222222222222,
+        "techHit": 1,
+        "techN": 2,
+        "text": "Rotate the O of secrets and reissue the JWT tokens",
+        "wall_s": 0.7373094579999997,
+        "eoa": null
+      },
+      {
+        "engine": "elevenlabs:scribe_v2",
+        "mode": "batch",
+        "id": "u04",
+        "voice": "daniel",
+        "cond": "clean",
+        "wer": 0.2,
+        "techHit": 3,
+        "techN": 4,
+        "text": "Check git status and commit with message fix VAD end pointing",
+        "wall_s": 1.0423794580000003,
+        "eoa": null
+      },
+      {
+        "engine": "elevenlabs:scribe_v2",
+        "mode": "batch",
+        "id": "u04",
+        "voice": "samantha",
+        "cond": "clean",
+        "wer": 0.2,
+        "techHit": 3,
+        "techN": 4,
+        "text": "Check git status and commit with message fix VAD end pointing",
+        "wall_s": 0.8041569170000002,
+        "eoa": null
+      },
+      {
+        "engine": "elevenlabs:scribe_v2",
+        "mode": "batch",
+        "id": "u06",
+        "voice": "daniel",
+        "cond": "clean",
+        "wer": 0.2,
+        "techHit": 1,
+        "techN": 2,
+        "text": "Rewrite the decur file to cache the pnpm store between builds",
+        "wall_s": 0.9981260840000014,
+        "eoa": null
+      }
+    ]
+  }
+}
