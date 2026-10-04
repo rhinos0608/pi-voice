@@ -34,8 +34,12 @@ a365182 "unverified" reject message distinct from "not your voice"
 dd54b46 channel-0 capture + persistent converter, AGC off default; no terminal reject before 2.5 s; 6-clip quality-gated enrollment
 38a0c9f research/speaker-diag diagnostic tool
 46de542 shared VAD speech-frame rule (feedVadSpeechFrame in src/vad.ts) for enrollment + live gate
+e15431e durable orchestrator handoff notes
+f874647 capture readiness independent of playback readiness
+d6f1148 research probe + diagnostics E/F/D, helper failure + rate bounds
+fde497f speaker capture path metadata, gate matching, and enrollment source stability
 ```
-Last verified at 46de542 (measured): `npm run typecheck` exit 0, `node --test --test-timeout=60000 test/*.test.ts` 472/472.
+Last verified in this session (measured): typecheck exit 0; full tests 488/488; diff check clean. Also validated Swift compile and diagnostic self-test before the final commands-only cleanup change.
 
 ## Architecture map
 
@@ -69,39 +73,22 @@ Last verified at 46de542 (measured): `npm run typecheck` exit 0, `node --test --
   "SAMPLE-RATE MISMATCH" warnings in that run were a tool artifact (wall clock included startup; ffmpeg also ~86%).
 - Owner enrollment through path A after dd54b46: pairwise mean 0.76 min 0.54.
 
-## In flight at handoff
+## Current state after latest commits
 
-Workflow `78b1c611-bb3e-4816-9e9c-767987184d1d` (async; completion wakes the session):
-1. `probe-concurrent` — can raw ffmpeg capture run concurrently with the helper's VP without being altered? (research/speaker-diag/concurrent/)
-2. `fix-helper-start` — capture must not fail when playback isn't ready (owner hit "Playback unavailable: player has no output connection").
-3. `diag-path-e` — diag path E = ffmpeg raw while helper VP runs; fix rate warning; scores at 2.5 s/4 s.
-4. then `raw-speaker-path` — speaker gate + enrollment + `/voice test speaker` on a dedicated raw ffmpeg capture with own VAD,
-   only while needed; fix `/voice test speaker` always "no usable speech captured" (root cause to be stated); bare `/voice speaker`
-   shows status; profile records capture path. Writer must STOP if probe says infeasible.
-5. then `review`.
-Check with `subagent({action:"status", id:"78b1c611-bb3e-4816-9e9c-767987184d1d"})` if no wake arrives. Do not poll.
-
-**Update after `probe-concurrent` finished (reported, research/speaker-diag/concurrent/results.md):** concurrent ffmpeg
-capture works (no errors, byte rate intact, helper rate unaffected) but while the helper runs VP the raw ffmpeg feed is
-**attenuated 15–26 dB and gated** (zero fraction 0.6% → 11–20%) — Apple VP affects the shared device feed system-wide.
-So the planned "dedicated raw ffmpeg capture alongside the helper" is NOT clean. `diag-path-e` was steered to add
-**path F** = helper VP on, toggled to bypass only during each recording; diag default paths E,F,D.
-**Action when `raw-speaker-path` (stage 2) starts or reports:** it must NOT ship the concurrent-ffmpeg design. Keep only
-items 2–4 (fix `/voice test speaker` with stated root cause, bare `/voice speaker` status, profile capture-path field) and
-make the speaker capture source a small strategy seam; choose the strategy only after the owner runs diag E/F/D.
-Likely winner if F ≈ D: bypass VP during the capture phase (AEC is not needed then — wake already cancelled TTS),
-keeping one continuous stream for STT/VAD/gate. If stage 2 already implemented the concurrent design, revert that part
-via a follow-up worker (do not hand-edit).
+- Live gate still uses the session source; **no concurrent ffmpeg speaker capture or source switch** was implemented. Owner's ambient-only probe found that concurrent ffmpeg bytes arrive at the nominal rate, but Apple's VP system-wide attenuates them 15–26 dB and gates them (zero fraction 0.6%→11–20%). Speech effect is unverified.
+- Diagnostic `node research/speaker-diag/diag.mjs` defaults to E/F/D: E ffmpeg while VP helper runs, F ffmpeg while a restarted helper runs with bypass, D ffmpeg alone. F prints helper restart latency (there is no runtime bypass command). It reports speech-only cosine plus 2.5/4 s windows and checks helper health after capture. Rate sanity flags <95% or >105%. `--self-test` passes; real mic run is still needed.
+- Capture/playback startup decoupled: helper capture READY no longer depends on player readiness; playback errors fail only the sink operation. Swift compile and real-binary silence-drain tests passed. Actual owner-machine first-start race still needs confirmation.
+- `/voice test speaker` asks for a ~4 s phrase (capture's minimum is 2.5 s speech), reports speech ms, score, threshold, decision. Bare `/voice speaker` reports status. Profile stores `capture: raw|processed`; enrollment snapshots path and rejects isolation toggles mid-enrollment. Status and live gate compare against the current selected helper/fallback source. Legacy profiles with unset capture stay silent.
+- New commits above are complete. Latest measured checks: `npm run typecheck` and full tests 488/488; `git diff --check` clean. Swift compile and diagnostic self-test pass; two existing-style `Optional<CFString>` Swift warnings remain.
 
 ## Next steps
 
-1. Read workflow results; verify yourself (typecheck, full tests, `xcrun swiftc -O native/voice-io.swift -o /tmp/vio`), review findings → fix rounds → commit.
-2. Ask owner to: restart Pi, `/voice setup`, run `node research/speaker-diag/diag.mjs` (default paths E,D) and paste the summary,
-   re-enroll (`/voice enroll`), `/voice test speaker` ×4–5, ideally have another person try. Set `PI_VOICE_DEBUG=1`.
-3. Recalibrate thresholds on real data (current: suggested = min LOO − 0.05 clamped [0.5,0.85]; owner profile thr 0.643).
-4. If raw capture is infeasible concurrently: alternatives = briefly switch helper to bypass during capture phase (AEC not needed
-   after barge-in cancels TTS) — measure C-path again; or isolation off for speaker path.
-5. Open/unverified: echo cancellation quality not measured live; named-mic selection untested; route-change restarts untested on hardware.
+1. Owner: restart Pi, run `/voice setup` to rebuild the helper.
+2. Run `node research/speaker-diag/diag.mjs` in Terminal (defaults E,F,D) with the same phrases per path; paste `COPY-PASTE SUMMARY`. Audio remains in memory only. This determines whether bypass during capture (F) approaches plain ffmpeg (D); do not change production speaker capture before this evidence.
+3. Re-enroll (`/voice enroll`) after selecting the capture strategy; then test `/voice test speaker` 4–5 times and ideally have another speaker try.
+4. Thresholds still require calibration on real human data. Previous owner profile: threshold 0.643; old enrollment pairwise mean 0.76, min 0.54, made through processed path.
+5. Remaining hardware gaps: first-start capture readiness; interactive E/F/D; named-mic selection; route-change converter behavior; live AEC quality.
+
 
 ## Pitfalls seen with subagents
 
@@ -114,5 +101,4 @@ via a follow-up worker (do not hand-edit).
 
 ## Untracked leftovers (owner may delete)
 
-research/stt-bench/{wav,tmp,apple-stt,run-apple.out}, research/speaker-bank/tmp/{embeddings,manifest}.json.
-`research/speaker-diag/diag.mjs` currently modified by in-flight `diag-path-e`; `research/speaker-diag/concurrent/` from the probe.
+research/stt-bench/{wav,tmp,apple-stt,run-apple.out}, research/speaker-bank/tmp/{embeddings,manifest}.json. These are generated/local artifacts and remain untracked.
