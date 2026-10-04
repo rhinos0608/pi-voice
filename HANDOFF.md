@@ -81,9 +81,28 @@ Last verified in this session (measured): typecheck exit 0; full tests 488/488; 
 - `/voice test speaker` asks for a ~4 s phrase (capture's minimum is 2.5 s speech), reports speech ms, score, threshold, decision. Bare `/voice speaker` reports status. Profile stores `capture: raw|processed`; enrollment snapshots path and rejects isolation toggles mid-enrollment. Status and live gate compare against the current selected helper/fallback source. Legacy profiles with unset capture stay silent.
 - New commits above are complete. Latest measured checks: `npm run typecheck` and full tests 488/488; `git diff --check` clean. Swift compile and diagnostic self-test pass; two existing-style `Optional<CFString>` Swift warnings remain.
 
+## Owner diag rerun 2026-10-04 ~22:15 local (INVALID)
+
+- Every D/E/F clip was -71..-77 dBFS RMS (earlier D run: about -33); VAD found 0 ms of speech in 3 of 4 F clips. Parent measured
+  afterwards with no helper running: ambient ffmpeg = -57.1 dBFS, zero 0.77% (normal); input volume 71; default input is the built-in mic.
+  Speech at 15 dB below the quiet-room floor matches the 'ffmpeg + VP helper elsewhere' signature, so another Pi session's helper was
+  likely live (not provable: no debug log). Pi processes: 80968 (about 5 h old, runs OLD pi-voice code, holds the mic via ffmpeg pid 81229,
+  possibly this orchestrator session) and 71959 (new). Do not kill them.
+- `/voice test speaker` x5 in the new session (processed path, profile enrolled on processed path, legacy `capture` unset): 0.71, 0.51,
+  0.65, 0.72, 0.48 against threshold 0.64 => 3 accepts, 2 rejects. This confirms the processed path is inconsistent (path A within-cosine 0.66).
+- ffmpeg rate shows 89% on every clip, even after the first-byte fix; the probe measured 25-28.6 kB/s over 10 s against 32 kB/s nominal.
+  Possible real sample loss in the raw path.
+- Done (committed): the diag now refuses to run while a foreign `voice-io-<hash>` helper is running (`--force` overrides).
+  Clips below -50 dBFS RMS or with VAD under 1.5 s are INVALID and excluded; no verdict for a path with under 3 valid clips.
+- ffmpeg rate probe (research/speaker-diag/rate/results.md, measured by subagent, 9 runs, concurrent with the owner's pid 81229):
+  steady-state 85.8-88.2% of 32 kB/s with no stderr warnings, no tail loss and max gap 28-51 ms. `-thread_queue_size 4096` and removing
+  nobuffer/probesize do not change it. This is real under-delivery, NOT an accounting artifact. Dropped audio vs a slow clock is unresolved;
+  a simultaneous helper (VP off) vs ffmpeg alignment-drift test would discriminate. It affects the production raw path
+  (isolation off / fallback). Note: path C (the helper's own bypassed stream, 100% delivery) scored 0.79 vs D 0.89.
+
 ## Next steps
 
-1. Owner: restart Pi, run `/voice setup` to rebuild the helper.
+1. Owner: restart Pi, run `/voice setup` to rebuild the helper. Before the diag, run `/voice off` in EVERY Pi session.
 2. Run `node research/speaker-diag/diag.mjs` in Terminal (defaults E,F,D) with the same phrases per path; paste `COPY-PASTE SUMMARY`. Audio remains in memory only. This determines whether bypass during capture (F) approaches plain ffmpeg (D); do not change production speaker capture before this evidence.
 3. Re-enroll (`/voice enroll`) after selecting the capture strategy; then test `/voice test speaker` 4–5 times and ideally have another speaker try.
 4. Thresholds still require calibration on real human data. Previous owner profile: threshold 0.643; old enrollment pairwise mean 0.76, min 0.54, made through processed path.
