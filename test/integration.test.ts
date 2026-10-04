@@ -1097,6 +1097,79 @@ describe("speaker gate", () => {
     h.endpointers[0].start(0.5);
   }
 
+  it("warns once when the profile capture path differs from the current pipeline", async () => {
+    const h = makeHarness({});
+    armGate(h, { accept: true });
+    h.deps.getSpeakerProfile = () => ({
+      version: 1 as const,
+      model: "/tmp/speaker.onnx",
+      dim: 2,
+      centroid: [1, 0],
+      enrolledAt: "2026-01-02T00:00:00.000Z",
+      enrollScores: [0.9, 0.9, 0.9, 0.9],
+      suggestedThreshold: 0.75,
+      capture: "raw",
+    });
+    await captureWithSpeech(h);
+    assert.equal(h.host.notifies.filter((m) => /re-enroll for best accuracy/.test(m)).length, 1);
+    assert.ok(h.host.notifies.some((m) => /capture is now processed/.test(m)));
+  });
+
+  it("stays quiet when profile and selected source match (both directions)", async () => {
+    for (const capture of ["processed", "raw"] as const) {
+      const h = makeHarness({});
+      armGate(h, { accept: true });
+      h.deps.getSpeakerCapturePath = () => capture;
+      h.deps.getSpeakerProfile = () => ({
+        version: 1 as const,
+        model: "/tmp/speaker.onnx",
+        dim: 2,
+        centroid: [1, 0],
+        enrolledAt: "2026-01-02T00:00:00.000Z",
+        enrollScores: [0.9, 0.9, 0.9, 0.9],
+        suggestedThreshold: 0.75,
+        capture,
+      });
+      await captureWithSpeech(h);
+      assert.equal(
+        h.host.notifies.filter((m) => /re-enroll for best accuracy/.test(m)).length,
+        0,
+        `expected no warning for matching ${capture}`,
+      );
+    }
+  });
+
+  it("warns once in both mismatch directions and names the current source", async () => {
+    for (const [profile, current] of [["raw", "processed"], ["processed", "raw"]] as const) {
+      const h = makeHarness({});
+      armGate(h, { accept: true });
+      h.deps.getSpeakerCapturePath = () => current;
+      h.deps.getSpeakerProfile = () => ({
+        version: 1 as const,
+        model: "/tmp/speaker.onnx",
+        dim: 2,
+        centroid: [1, 0],
+        enrolledAt: "2026-01-02T00:00:00.000Z",
+        enrollScores: [0.9, 0.9, 0.9, 0.9],
+        suggestedThreshold: 0.75,
+        capture: profile,
+      });
+      await captureWithSpeech(h);
+      const warnings = h.host.notifies.filter((m) => /re-enroll for best accuracy/.test(m));
+      assert.equal(warnings.length, 1, `expected one warning for ${profile} vs ${current}`);
+      assert.ok(warnings[0]?.includes(`capture is now ${current}`), `warning should name ${current}`);
+    }
+  });
+
+  it("stays quiet for legacy profiles with capture unset", async () => {
+    const h = makeHarness({});
+    armGate(h, { accept: true });
+    h.deps.getSpeakerCapturePath = () => "raw";
+    // armGate's profile has no capture field: legacy, stays silent.
+    await captureWithSpeech(h);
+    assert.equal(h.host.notifies.filter((m) => /re-enroll for best accuracy/.test(m)).length, 0);
+  });
+
   it("reject mid-utterance cancels STT and submits nothing", async () => {
     const h = makeHarness({});
     armGate(h, { accept: false });

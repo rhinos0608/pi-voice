@@ -32,6 +32,13 @@ export type SpeakerProfile = {
   anchors?: number[][];
   /** Owner-voice samples learned during normal use (FIFO-capped). */
   learned?: LearnedSample[];
+  /**
+   * Capture path the profile was enrolled on. "processed" is the
+   * voice-isolation helper pipeline (current); "raw" is reserved for a
+   * future unprocessed capture pending owner diagnostics (E/F/D). Absent
+   * on legacy profiles, which stay unspecified rather than defaulted.
+   */
+  capture?: "raw" | "processed";
 };
 
 /** Minimum enrollment clips required to build a profile. Leave-one-out scoring with 3 clips is too noisy. */
@@ -283,6 +290,7 @@ export async function loadSpeakerProfile(
   if (anchors !== undefined) profile.anchors = anchors;
   const learned = parseLearned(r["learned"], dim);
   if (learned !== undefined) profile.learned = learned;
+  if (r["capture"] === "raw" || r["capture"] === "processed") profile.capture = r["capture"];
   return profile;
 }
 

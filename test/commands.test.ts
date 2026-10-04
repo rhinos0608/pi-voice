@@ -705,10 +705,12 @@ describe("isolation and speaker commands", () => {
     assert.equal(starts, startsBefore);
   });
 
-  it("test speaker reports score vs threshold and submits nothing", async () => {
+  it("test speaker prompts for a ~4 s phrase and reports score vs threshold", async () => {
     const bag = makeEnv();
     makeSpokedEnv(bag);
     await handleVoiceCommand("test speaker", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((n) => n.message).join("\n");
+    assert.ok(/~4 s/.test(text), text);
     assert.ok(
       bag.notified.some((n) => /speaker test: score 1\.00 vs threshold 0\.78 \(normal\) — accept \(nothing submitted, speech 2000 ms\)/.test(n.message)),
     );
@@ -737,6 +739,204 @@ describe("isolation and speaker commands", () => {
     const text = bag.notified.map((m) => m.message).join("\n");
     assert.ok(/speaker test: score 1\.00 vs threshold 0\.78 \(normal\) — accept/.test(text), text);
     assert.ok(/speech 2000 ms/.test(text), text);
+  });
+
+  it("test speaker too-short reports captured speech ms and asks for a longer phrase", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag, {
+      captureImpl: async (): Promise<CaptureResult> => ({ status: "too-short", speechMs: 400 }),
+    });
+    await handleVoiceCommand("test speaker", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((n) => n.message).join("\n");
+    assert.ok(/only 400 ms of speech captured/.test(text), text);
+    assert.ok(/longer phrase.*~4 s/.test(text), text);
+    assert.ok(!/no usable speech captured/.test(text), text);
+  });
+
+  it("enroll tags the saved profile with the current capture path", async () => {
+    const bag = makeEnv();
+    const sp = makeSpokedEnv(bag, { profile: undefined });
+    await handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
+    assert.equal(sp.saved.length, 1);
+    assert.equal(sp.saved[0]?.capture, "processed");
+  });
+
+  it("enroll tags raw when isolation is off (actual source, not the preference default)", async () => {
+    const bag = makeEnv({ prefs: { isolation: false } });
+    const sp = makeSpokedEnv(bag, { profile: undefined });
+    await handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
+    assert.equal(sp.saved.length, 1);
+    assert.equal(sp.saved[0]?.capture, "raw");
+  });
+
+  it("enroll tags raw when the helper fell back, processed when the helper serves", async () => {
+    const fellBack = makeEnv();
+    const fellBackSp = makeSpokedEnv(fellBack, { profile: undefined, fallback: true });
+    await handleVoiceCommand("enroll", ctxFor(fellBack.notified), fellBack.env);
+    assert.equal(fellBackSp.saved[0]?.capture, "raw");
+    const served = makeEnv();
+    const servedSp = makeSpokedEnv(served, { profile: undefined, helperBuilt: true, fallback: false });
+    await handleVoiceCommand("enroll", ctxFor(served.notified), served.env);
+    assert.equal(servedSp.saved[0]?.capture, "processed");
+    const missing = makeEnv();
+    const missingSp = makeSpokedEnv(missing, { profile: undefined, helperBuilt: false });
+    await handleVoiceCommand("enroll", ctxFor(missing.notified), missing.env);
+    assert.equal(missingSp.saved[0]?.capture, "raw");
+  });
+
+  it("isolation change is rejected while enrollment is active and the saved profile keeps the starting path", async () => {
+    const bag = makeEnv();
+    assert.equal(bag.prefs.isolation, true);
+    let releaseFirst!: (v: CaptureResult) => void;
+    let calls = 0;
+    const sp = makeSpokedEnv(bag, {
+      profile: undefined,
+      captureImpl: (_prompt, { signal }): Promise<CaptureResult> => {
+        calls++;
+        if (calls === 1) {
+          return new Promise<CaptureResult>((resolve) => {
+            releaseFirst = resolve;
+            signal.addEventListener("abort", () => resolve({ status: "cancelled" }), { once: true });
+          });
+        }
+        return Promise.resolve({ status: "ok", pcm: Buffer.from([1, 2, 3, 4]), speechMs: 2000 });
+      },
+    });
+    const pending = handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    await handleVoiceCommand("isolation off", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.isolation, true);
+    assert.ok(
+      bag.notified.some((n) => /cannot be changed while enrollment is in progress/.test(n.message)),
+      JSON.stringify(bag.notified),
+    );
+    // Status-only isolation read is still allowed during enrollment.
+    await handleVoiceCommand("isolation", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /isolation: on/.test(n.message)));
+    releaseFirst({ status: "ok", pcm: Buffer.from([1, 2, 3, 4]), speechMs: 2000 });
+    await pending;
+    assert.equal(sp.saved.length, 1);
+    assert.equal(sp.saved[0]?.capture, "processed");
+    assert.equal(bag.prefs.isolation, true);
+  });
+
+  it("a throwing capture-path snapshot or stop() still clears enrollment (later isolation changes allowed)", async () => {
+    // Capture-path getter throws before controller.stop runs.
+    {
+      const bag = makeEnv();
+      makeSpokedEnv(bag, { profile: undefined });
+      bag.env.getSpeakerCapturePath = (): never => {
+        throw new Error("capture boom");
+      };
+      await assert.rejects(handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env), /capture boom/);
+      // Enrollment must have released the guard: a later isolation change succeeds.
+      await handleVoiceCommand("isolation off", ctxFor(bag.notified), bag.env);
+      assert.equal(bag.prefs.isolation, false);
+      assert.ok(bag.notified.some((n) => n.message.startsWith("isolation: off")));
+      assert.ok(!bag.notified.some((n) => /cannot be changed while enrollment is in progress/.test(n.message)));
+    }
+    // controller.stop() throws after the capture snapshot.
+    {
+      const bag = makeEnv();
+      makeSpokedEnv(bag, { profile: undefined });
+      bag.env.controller.stop = async (): Promise<never> => {
+        throw new Error("stop boom");
+      };
+      await assert.rejects(handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env), /stop boom/);
+      await handleVoiceCommand("isolation off", ctxFor(bag.notified), bag.env);
+      assert.equal(bag.prefs.isolation, false);
+      assert.ok(bag.notified.some((n) => n.message.startsWith("isolation: off")));
+      assert.ok(!bag.notified.some((n) => /cannot be changed while enrollment is in progress/.test(n.message)));
+    }
+  });
+
+  it("status warns when the profile path differs from the current session source", async () => {
+    const bag = makeEnv({ prefs: { isolation: false } });
+    makeSpokedEnv(bag, {
+      profile: {
+        version: 1,
+        model: "/tmp/speaker.onnx",
+        dim: 2,
+        centroid: [1, 0],
+        enrolledAt: "2026-01-02T00:00:00.000Z",
+        enrollScores: [0.92, 0.88, 0.9, 0.91, 0.89],
+        suggestedThreshold: 0.78,
+        capture: "processed",
+      },
+    });
+    await handleVoiceCommand("status", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((n) => n.message).join("\n");
+    assert.ok(/capture.*processed.*vs current raw.*re-enroll for best accuracy/.test(text), text);
+  });
+
+  it("status stays silent when the profile path matches the current source", async () => {
+    const bag = makeEnv({ prefs: { isolation: false } });
+    makeSpokedEnv(bag, {
+      profile: {
+        version: 1,
+        model: "/tmp/speaker.onnx",
+        dim: 2,
+        centroid: [1, 0],
+        enrolledAt: "2026-01-02T00:00:00.000Z",
+        enrollScores: [0.92, 0.88, 0.9, 0.91, 0.89],
+        suggestedThreshold: 0.78,
+        capture: "raw",
+      },
+    });
+    await handleVoiceCommand("status", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((n) => n.message).join("\n");
+    assert.ok(!/capture.*re-enroll/.test(text), text);
+  });
+
+  it("status warns when the profile capture path differs from the current one", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag, {
+      profile: {
+        version: 1,
+        model: "/tmp/speaker.onnx",
+        dim: 2,
+        centroid: [1, 0],
+        enrolledAt: "2026-01-02T00:00:00.000Z",
+        enrollScores: [0.92, 0.88, 0.9, 0.91, 0.89],
+        suggestedThreshold: 0.78,
+        capture: "raw",
+      },
+    });
+    await handleVoiceCommand("status", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((n) => n.message).join("\n");
+    assert.ok(/capture.*raw.*re-enroll for best accuracy/.test(text), text);
+  });
+
+  it("speaker profile capture path round-trips through save/load", async () => {
+    const { mkdtemp, readFile, writeFile } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { loadSpeakerProfile, saveSpeakerProfile } = await import("../src/speaker.ts");
+    const dir = await mkdtemp(join(tmpdir(), "pi-voice-capture-"));
+    await saveSpeakerProfile(
+      {
+        version: 1,
+        model: "/tmp/speaker.onnx",
+        dim: 2,
+        centroid: [1, 0],
+        enrolledAt: "2026-01-02T00:00:00.000Z",
+        enrollScores: [0.9, 0.9, 0.9, 0.9],
+        suggestedThreshold: 0.78,
+        capture: "processed",
+      },
+      dir,
+    );
+    const loaded = await loadSpeakerProfile(dir);
+    assert.equal(loaded?.capture, "processed");
+    const raw = JSON.parse(await readFile(join(dir, "speaker.json"), "utf8")) as Record<string, unknown>;
+    assert.equal(raw["capture"], "processed");
+    // Legacy profiles without the field stay unspecified, not defaulted.
+    const legacyDir = await mkdtemp(join(tmpdir(), "pi-voice-capture-legacy-"));
+    const legacy = { ...(raw as object) } as Record<string, unknown>;
+    delete legacy["capture"];
+    await writeFile(join(legacyDir, "speaker.json"), JSON.stringify(legacy));
+    assert.equal((await loadSpeakerProfile(legacyDir))?.capture, undefined);
   });
 
   it("test speaker is off without a profile", async () => {

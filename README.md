@@ -150,9 +150,19 @@ review mode, nothing lands in the editor either).
   Each level offsets the enrolled threshold by low −0.05 / normal +0 /
   high +0.05.
 - Thresholds are **provisional**: calibrate with `/voice test speaker`, which
-  captures one utterance and reports score vs threshold without submitting
-  anything. Raise the level if lookalike voices pass; lower it if you get
-  rejected.
+  asks you to read a ~4 s sentence aloud (same >= 2.5 s speech floor as
+  enrollment and the gate) and reports speech ms, score vs threshold, and the
+  decision without submitting anything. A short take reports how much speech
+  was captured so you can retry with a longer phrase. Raise the level if
+  lookalike voices pass; lower it if you get rejected.
+- The profile records which capture path it was enrolled on (`capture`,
+  currently `processed` — the voice-processed session pipeline used by
+  enrollment and the gate). When the selected source differs (isolation off
+  or helper fallback captures `raw`), status and the gate warn once to
+  re-enroll for best accuracy. Whether verification should
+  move to unprocessed audio is still open: see `research/speaker-diag/`
+  (concurrent-capture probe + paths E/F/D, not yet confirmed with owner
+  speech), so no capture change is claimed here.
 - The check runs only when a profile is enrolled **and** the speaker model is
   cached; otherwise it is silently off (status says so).
 - **Privacy:** the profile is a numeric embedding (no audio) stored with mode

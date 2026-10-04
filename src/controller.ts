@@ -57,6 +57,8 @@ export type ControllerDeps = {
   getSpeakerCheck?: () => VoicePreferences["speakerCheck"];
   getSpeakerProfile?: () => SpeakerProfile | undefined;
   getSpeakerEmbed?: () => ((pcm: Buffer) => { length: number; [index: number]: number }) | undefined;
+  /** Active capture path for speaker audio: "processed" (helper VP) or "raw" (fallback/ffmpeg). Injected from the entry point so the live gate compares against the selected source; absent in older harnesses (defaults to processed). */
+  getSpeakerCapturePath?: () => "raw" | "processed";
   createSpeakerGate?: (opts: {
     embed: (pcm: Buffer) => { length: number; [index: number]: number };
     profile: SpeakerProfile;
@@ -184,6 +186,8 @@ export class VoiceController {
   } | null = null;
   /** Accept threshold in use for the armed utterance (reported to adaptProfile). */
   private gateThreshold = 0;
+  /** One-shot capture-path mismatch warning per controller lifetime. */
+  private speakerPathWarned = false;
   /** Scored accept sample awaiting an actual submission; consumed one-shot. */
   private acceptedVoice: {
     embedding: Float32Array;
@@ -743,6 +747,22 @@ export class VoiceController {
       const profile = this.deps.getSpeakerProfile?.();
       const embed = this.deps.getSpeakerEmbed?.();
       if (!profile || !embed || !this.deps.createSpeakerGate) return;
+      // The profile records the capture path it was enrolled on
+      // (SpeakerProfile.capture); a mismatch against the current pipeline
+      // degrades accuracy. Warn once per session; status carries the
+      // persistent note. Legacy profiles (capture unset) stay silent.
+      // Current means the selected session source (helper vs raw fallback),
+      // not a hardcoded path: isolation-off or helper-fallback sessions
+      // capture raw audio, so a processed profile must warn there too.
+      const currentCapture = this.deps.getSpeakerCapturePath?.() ?? "processed";
+      if (profile.capture !== undefined && profile.capture !== currentCapture && !this.speakerPathWarned) {
+        this.speakerPathWarned = true;
+        this.log("speaker", { captureMismatch: profile.capture, current: currentCapture });
+        this.host.notify(
+          `Speaker profile was enrolled on ${profile.capture} audio but capture is now ${currentCapture} — re-enroll for best accuracy.`,
+          "warning",
+        );
+      }
       const threshold = speakerThresholdFor(profile.suggestedThreshold, this.deps.getSpeakerCheck?.() ?? "normal");
       this.gateThreshold = threshold;
       this.speakerGate = this.deps.createSpeakerGate({ embed, profile, threshold });

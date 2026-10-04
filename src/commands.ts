@@ -97,6 +97,8 @@ export type CommandEnv = {
   inworldKeyLast4: () => string | undefined;
   listInworldVoices: (key: string) => Promise<VoiceEntry[]>;
   runTest: (kind: "mic" | "wake" | "tts" | "stt") => Promise<string>;
+  /** Active capture path for speaker audio: "processed" (helper VP) or "raw" (AVFoundation/ffmpeg). Injected from the entry point so it matches the actual source selection (isolation pref + fallback + helper availability), not merely the preference. Absent in older harnesses; commands derive from prefs/voiceIo instead. */
+  getSpeakerCapturePath?: () => "raw" | "processed";
   /** Voice-isolation helper state. Absent in older harnesses; commands degrade to prefs-only output. */
   voiceIo?: {
     helperBuilt(): boolean;
@@ -475,6 +477,36 @@ export function createSpeakerStore(persist: {
   };
 }
 
+/** Legacy default capture path (voice-processed session audio). Prefer currentSpeakerCapture(env), which reflects the actual selected source. */
+export const CURRENT_SPEAKER_CAPTURE = "processed" as const;
+
+/**
+ * Capture path of the currently selected session source. Uses the injected
+ * getter when present (matches the entry point's actual source selection);
+ * otherwise derives from prefs + helper state the same way ensureVoiceIo
+ * does: processed only when isolation is on, the helper is built, and no
+ * fallback has occurred. Legacy profiles with capture undefined stay silent.
+ */
+export function currentSpeakerCapture(env: CommandEnv): "raw" | "processed" {
+  if (env.getSpeakerCapturePath) return env.getSpeakerCapturePath();
+  const prefs = env.getPrefs();
+  const io = env.voiceIo;
+  if (!prefs.isolation) return "raw";
+  if (io && (io.hadFallback() || !io.helperBuilt())) return "raw";
+  return "processed";
+}
+
+/**
+ * Fixed ~4 s test sentence. Root cause of the old always-failing test:
+ * capture needs >= 2.5 s of VAD speech (same floor as enrollment and the
+ * gate), but the prompt asked for "one short phrase", so normal speech
+ * came back too-short and the test reported a generic "no usable speech
+ * captured" with no speech ms. The test now asks for ~4 s up front and
+ * reports the captured speech ms on a short take.
+ */
+const SPEAKER_TEST_PHRASE =
+  "Pack my box with five dozen liquor jugs before the delivery truck leaves the warehouse this afternoon";
+
 async function describeSpeaker(env: CommandEnv): Promise<string> {
   const prefs = env.getPrefs();
   const sp = env.speaker;
@@ -483,7 +515,11 @@ async function describeSpeaker(env: CommandEnv): Promise<string> {
   if (!profile) return `speaker: ${prefs.speakerCheck}, learning ${prefs.speakerLearn ?? true ? "on" : "off"} (not enrolled — run /voice enroll)`;
   const threshold = speakerThresholdFor(profile.suggestedThreshold, prefs.speakerCheck);
   const modelNote = sp.modelCachedPath() ? "" : "; model missing, check is off";
-  return `speaker: ${prefs.speakerCheck}, learning ${prefs.speakerLearn ?? true ? "on" : "off"}, enrolled ${profile.enrolledAt}, learned ${learnedCount(profile)}/${LEARN.maxLearned}, threshold ${threshold.toFixed(2)}${modelNote}`;
+  const captureNote =
+    profile.capture !== undefined && profile.capture !== currentSpeakerCapture(env)
+      ? `; capture ${profile.capture} vs current ${currentSpeakerCapture(env)} — re-enroll for best accuracy`
+      : "";
+  return `speaker: ${prefs.speakerCheck}, learning ${prefs.speakerLearn ?? true ? "on" : "off"}, enrolled ${profile.enrolledAt}, learned ${learnedCount(profile)}/${LEARN.maxLearned}, threshold ${threshold.toFixed(2)}${modelNote}${captureNote}`;
 }
 
 async function runSpeakerTest(ctx: CommandCtx, env: CommandEnv): Promise<void> {
@@ -503,10 +539,17 @@ async function runSpeakerTest(ctx: CommandCtx, env: CommandEnv): Promise<void> {
     ctx.notify("Speaker check is off: model missing (run /voice setup).", "warning");
     return;
   }
-  ctx.notify("Speaker test: read one short phrase…", "info");
-  const capture = await sp.capturePhrase("speaker test phrase", { signal: new AbortController().signal });
+  ctx.notify(`Speaker test: read aloud (~4 s) — "${SPEAKER_TEST_PHRASE}"`, "info");
+  const capture = await sp.capturePhrase(SPEAKER_TEST_PHRASE, { signal: new AbortController().signal });
+  if (capture.status === "cancelled") {
+    ctx.notify("Speaker test cancelled.", "warning");
+    return;
+  }
   if (capture.status !== "ok") {
-    ctx.notify("Speaker test: no usable speech captured.", "warning");
+    ctx.notify(
+      `Speaker test: only ${Math.round(capture.speechMs)} ms of speech captured — read a longer phrase (~4 s) and try again.`,
+      "warning",
+    );
     return;
   }
   const embedder = sp.createEmbedder(modelPath);
@@ -582,10 +625,22 @@ async function runEnrollment(ctx: CommandCtx, env: CommandEnv): Promise<void> {
   }
   const session: EnrollmentSession = { abort: new AbortController() };
   activeEnrollment = session;
-  const wasListening =
-    (env.controller as { getPhase?: () => string }).getPhase?.() !== "off";
-  await env.controller.stop();
+  // Snapshot the actual capture source at enrollment start so the saved
+  // profile metadata is stable even if the source selection changes
+  // mid-enrollment (isolation toggles are rejected while active, but the
+  // helper fallback state could still flip under us).
+  // Every throwable operation after claiming activeEnrollment (capture-path
+  // snapshot, phase check, controller.stop, and the enrollment body) runs
+  // inside this try so a throw still clears activeEnrollment in `finally`
+  // and never wedges later isolation changes. Stop/start errors propagate
+  // (no broad catch) — cleanup still runs.
+  let enrollmentCapture: "raw" | "processed";
+  let wasListening = false;
   try {
+    enrollmentCapture = currentSpeakerCapture(env);
+    wasListening =
+      (env.controller as { getPhase?: () => string }).getPhase?.() !== "off";
+    await env.controller.stop();
     let modelPath: string;
     try {
       modelPath = await sp.ensureModel(session.abort.signal);
@@ -667,6 +722,10 @@ async function runEnrollment(ctx: CommandCtx, env: CommandEnv): Promise<void> {
     }
     const pairwise = pairwiseSummary(embeddings);
     const profile = sp.buildProfile(embeddings, modelPath);
+    // Tag the profile with the source actually used for this enrollment
+    // session (helper VP vs raw fallback); the live gate compares against
+    // the same current-source value.
+    profile.capture = enrollmentCapture;
     await sp.saveProfile(profile);
     const scores = profile.enrollScores.map((s) => s.toFixed(2)).join(", ");
     const effective = speakerThresholdFor(profile.suggestedThreshold, env.getPrefs().speakerCheck);
@@ -1025,6 +1084,10 @@ export async function handleVoiceCommand(
       }
       if (value !== "on" && value !== "off") {
         ctx.notify("Usage: /voice isolation on|off", "warning");
+        return;
+      }
+      if (activeEnrollment) {
+        ctx.notify("Isolation cannot be changed while enrollment is in progress — wait until enrollment completes or cancel with /voice off.", "warning");
         return;
       }
       await env.mutatePrefs((prefs) => {

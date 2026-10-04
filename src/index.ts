@@ -481,6 +481,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     getSpeakerCheck: () => (speakerStore.get() && speakerModelCachedPath() ? prefs.speakerCheck : "off"),
     getSpeakerProfile: () => speakerStore.get(),
     getSpeakerEmbed: () => ensureSpeakerEmbedder(),
+    getSpeakerCapturePath: () => (ensureVoiceIo() ? "processed" : "raw"),
     createSpeakerGate: (opts) => createSpeakerGate(opts as unknown as Parameters<typeof createSpeakerGate>[0]),
     setSpeakerProfile: (profile) => {
       speakerStore.setCurrent(profile);
@@ -500,6 +501,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         return prefs;
       },
       getPrefs: () => prefs,
+      getSpeakerCapturePath: () => (ensureVoiceIo() ? "processed" : "raw"),
       keyPresent: () => keyStatus().present,
       keyLast4: () => keyStatus().last4,
       isProvisioned: () => isWakeModelProvisioned(),
