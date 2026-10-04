@@ -112,10 +112,19 @@ Workflow `d1d262b8-430b-483d-a8eb-f1617f40efd5`, 5 researcher reports in subagen
   apps since macOS 15.4 (works only via the perl-adapter workaround).
 - Researchers assumed we gate at 1.2 s. We do not: the owner's 5 `/voice test speaker` runs had 5.4-5.7 s of speech and still spread 0.48-0.72
   (processed path). Whole-utterance scoring alone did not fix it. The raw path's accept/reject rates have never been measured.
-- Decision pending with owner: demote speaker ID to an opt-in soft signal and add deterministic gates, versus one time-boxed
-  clean-audio retest with real impostor audio.
+- **Owner DECIDED (2026-10-05): option 1.** No voice check: speaker verification off (default off; keep the code as an opt-in).
+  "hey pi"/"hi pi" just work. Add a **push-to-talk key** and **ignore other audio playing on the Mac**.
+  Do NOT add the keyboard-recency gate. The near-field level gate was not requested; don't build it.
+- Pi has `pi.registerShortcut()` (focused terminal only; key presses, no releases). Global hold-to-talk needs a native
+  key listener.
+- Workflow `f3e2a67a-1991-47b0-a8ca-cd89a6333308` (read-only): scout-integration (controller seams for PTT start/commit, helper
+  lifecycle/protocol/run loop, speakerCheck default, ducking config), hotkey research (Carbon RegisterEventHotKey press/release vs
+  CGEventTap/Input Monitoring, Pi registerShortcut), other-audio research (does macOS VP cancel other apps' output? ducking defaults;
+  Core Audio process taps + permission; permission-free process-output signals; reference-based wake suppression/AEC). Next: write a plan,
+  confirm product choices (hold vs toggle, key, global vs focused, contaminated-utterance behaviour), then delegate by file ownership.
+  Any hardware test that plays audible sound needs the owner's OK first.
 
-## Next steps (superseded pending the decision above)
+## Next steps (superseded by the decision above)
 
 1. Owner: restart Pi, run `/voice setup` to rebuild the helper. Before the diag, run `/voice off` in EVERY Pi session.
 2. Run `node research/speaker-diag/diag.mjs` in Terminal (defaults E,F,D) with the same phrases per path; paste `COPY-PASTE SUMMARY`. Audio remains in memory only. This determines whether bypass during capture (F) approaches plain ffmpeg (D); do not change production speaker capture before this evidence.
