@@ -4,3 +4,5 @@ node_modules/
 .pi-smartread/
 .pi-smartread.tags.cache/
 .smart-edit-undo/
+research/speaker-bank/
+research/stt-bench/
