@@ -25,10 +25,12 @@ export type VoicePreferences = {
   sendMode: "auto" | "review";
   /** Voice-isolation helper (echo cancellation, noise suppression, AGC). Default on when built. */
   isolation: boolean;
-  /** Owner-voice check strictness. Effective only when a speaker profile is enrolled. */
+  /** Owner-voice check strictness. Effective only when a speaker profile is enrolled. Off by default (experimental opt-in). */
   speakerCheck: "off" | "low" | "normal" | "high";
   /** Learn the owner voice from accepted+submitted utterances. Default on. */
   speakerLearn: boolean;
+  /** Push-to-talk combo text (e.g. "ctrl+option+space") or "off". */
+  pushToTalk: string;
 };
 
 export const DEFAULT_PREFERENCES: VoicePreferences = {
@@ -42,8 +44,10 @@ export const DEFAULT_PREFERENCES: VoicePreferences = {
   tts: false,
   sendMode: "auto",
   isolation: true,
-  speakerCheck: "normal",
+  speakerCheck: "off",
   speakerLearn: true,
+  // Must match DEFAULT_PUSH_TO_TALK in src/hotkey.ts (kept literal to avoid a dependency).
+  pushToTalk: "ctrl+option+space",
 };
 
 /** Threshold offset applied to profile.suggestedThreshold per strictness level. */

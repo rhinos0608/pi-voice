@@ -1738,3 +1738,195 @@ describe("VAD framing parity (enrollment vs live gate)", () => {
     assert.deepEqual(enrolled, ["f2", "f3", "f4"]);
   });
 });
+
+describe("push-to-talk", () => {
+  it("speaker check is off by default, so no gate is armed", async () => {
+    assert.equal(DEFAULT_PREFERENCES.speakerCheck, "off");
+    const h = makeHarness({});
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.endpointers[0].end(1.3);
+    assert.equal(h.utterances[0].commits, 1);
+    h.utterances[0].handlers.onFinal("owner words here");
+    assert.deepEqual(h.host.sent[0], { text: "owner words here", opts: undefined });
+  });
+
+  it("hold + speak + release submits once", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.controller.pushToTalkDown();
+    assert.equal(h.controller.getPhase(), "capture");
+    assert.equal(h.utterances.length, 1);
+    h.endpointers[0].start(0.5);
+    h.controller.pushToTalkUp();
+    assert.equal(h.utterances[0].commits, 1);
+    h.utterances[0].handlers.onFinal("hello world");
+    assert.equal(h.host.sent.length, 1);
+    assert.deepEqual(h.host.sent[0], { text: "hello world", opts: undefined });
+    assert.equal(h.controller.getPhase(), "wake");
+  });
+
+  it("review mode stages to the editor on release", async () => {
+    const h = makeHarness({ prefs: { sendMode: "review" } });
+    await h.controller.start();
+    h.controller.pushToTalkDown();
+    h.endpointers[0].start(0.5);
+    h.controller.pushToTalkUp();
+    h.utterances[0].handlers.onFinal("take notes");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.host.editor, "take notes");
+  });
+
+  it("release with no speech cancels quietly without submit", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.controller.pushToTalkDown();
+    const notices = h.host.notifies.length;
+    h.controller.pushToTalkUp();
+    assert.equal(h.controller.getPhase(), "wake");
+    assert.equal(h.utterances[0].commits, 0);
+    assert.equal(h.utterances[0].closed, 1);
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.host.notifies.length, notices);
+    assert.equal(h.host.statuses.at(-1), "🎙 listening");
+  });
+
+  it("VAD end while held does not commit; release commits", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.controller.pushToTalkDown();
+    h.endpointers[0].start(0.5);
+    h.endpointers[0].end(1.3);
+    assert.equal(h.utterances[0].commits, 0);
+    assert.equal(h.controller.getPhase(), "capture");
+    h.controller.pushToTalkUp();
+    assert.equal(h.utterances[0].commits, 1);
+    h.utterances[0].handlers.onFinal("held words");
+    assert.deepEqual(h.host.sent[0], { text: "held words", opts: undefined });
+  });
+
+  it("no-speech timeout does not fire while held", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.controller.pushToTalkDown();
+    h.fireMs(5000);
+    assert.equal(h.controller.getPhase(), "capture");
+    assert.equal(h.utterances[0].closed, 0);
+    assert.equal(h.errorCues(), 0);
+    // Release with nothing heard still cancels quietly.
+    h.controller.pushToTalkUp();
+    assert.equal(h.controller.getPhase(), "wake");
+    assert.equal(h.host.sent.length, 0);
+  });
+
+  it("down while speaking cancels TTS and opens a PTT capture", async () => {
+    const h = makeHarness({ prefs: { tts: true, voiceId: "v1" } });
+    await h.controller.start();
+    h.controller.onMessageUpdate({ role: "assistant" }, "text_delta", "Spoken words here. ".repeat(10));
+    assert.equal(h.controller.getPhase(), "speaking");
+    h.controller.pushToTalkDown();
+    assert.equal(h.speeches[0].fake.cancelled, 1);
+    assert.equal(h.controller.getPhase(), "capture");
+    h.endpointers[0].start(0.5);
+    h.endpointers[0].end(1.3);
+    assert.equal(h.utterances[0].commits, 0);
+    h.controller.pushToTalkUp();
+    assert.equal(h.utterances[0].commits, 1);
+  });
+
+  it("down during a wake-started capture converts it to push-to-talk", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.detectors[0].fire();
+    assert.equal(h.controller.getPhase(), "capture");
+    h.controller.pushToTalkDown();
+    assert.equal(h.utterances.length, 1);
+    h.endpointers[0].start(0.5);
+    h.endpointers[0].end(1.3);
+    assert.equal(h.utterances[0].commits, 0);
+    h.controller.pushToTalkUp();
+    assert.equal(h.utterances[0].commits, 1);
+    h.utterances[0].handlers.onFinal("converted words");
+    assert.deepEqual(h.host.sent[0], { text: "converted words", opts: undefined });
+  });
+
+  it("stray up without a matching down is ignored", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.controller.pushToTalkUp();
+    assert.equal(h.controller.getPhase(), "wake");
+    assert.equal(h.utterances.length, 0);
+  });
+
+  it("down is ignored when off, when PTT is off, and once transcribing", async () => {
+    const off = makeHarness({});
+    off.controller.pushToTalkDown();
+    assert.equal(off.controller.getPhase(), "off");
+    assert.equal(off.utterances.length, 0);
+
+    const disabled = makeHarness({ prefs: { pushToTalk: "off" } });
+    await disabled.controller.start();
+    disabled.controller.pushToTalkDown();
+    assert.equal(disabled.controller.getPhase(), "wake");
+    assert.equal(disabled.utterances.length, 0);
+
+    const h = makeHarness({});
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.endpointers[0].end(1.3);
+    assert.equal(h.utterances[0].commits, 1);
+    h.controller.pushToTalkDown();
+    assert.equal(h.utterances.length, 1);
+    assert.equal(h.controller.getPhase(), "capture");
+  });
+
+  it("stop while held resets the hold", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.controller.pushToTalkDown();
+    await h.controller.stop();
+    assert.equal(h.controller.getPhase(), "off");
+    // Late release is stray and harmless.
+    h.controller.pushToTalkUp();
+    assert.equal(h.host.sent.length, 0);
+    // Listening works again afterwards.
+    await h.controller.start();
+    h.detectors[1].fire();
+    assert.equal(h.controller.getPhase(), "capture");
+    h.endpointers[1].start(0.5);
+    h.endpointers[1].end(1.3);
+    h.utterances[1].handlers.onFinal("fresh words");
+    assert.deepEqual(h.host.sent[0], { text: "fresh words", opts: undefined });
+  });
+
+  it("listener-close release commits the hold when speech was heard", async () => {
+    // Regression: closeHotkeyListener must finish an in-flight hold via
+    // pushToTalkUp() before closing, or VAD end-of-speech and the no-speech
+    // timeout stay suppressed and the capture sticks until the STT cap.
+    const h = makeHarness({});
+    await h.controller.start();
+    h.controller.pushToTalkDown();
+    h.endpointers[0].start(0.5);
+    assert.equal(h.controller.getPhase(), "capture");
+    // This is exactly what closeHotkeyListener now invokes before close.
+    h.controller.pushToTalkUp();
+    assert.equal(h.utterances[0].commits, 1);
+    h.utterances[0].handlers.onFinal("held words");
+    assert.deepEqual(h.host.sent[0], { text: "held words", opts: undefined });
+  });
+
+  it("listener-close release cancels the hold quietly when nothing was heard", async () => {
+    const h = makeHarness({});
+    await h.controller.start();
+    h.controller.pushToTalkDown();
+    assert.equal(h.controller.getPhase(), "capture");
+    // Same release path closeHotkeyListener invokes: no speech, so cancel.
+    h.controller.pushToTalkUp();
+    assert.equal(h.controller.getPhase(), "wake");
+    assert.equal(h.utterances[0].closed, 1);
+    assert.equal(h.utterances[0].commits, 0);
+    assert.equal(h.host.sent.length, 0);
+  });
+});

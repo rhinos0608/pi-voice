@@ -36,6 +36,21 @@ Voice wake-word input + speech output for Pi (macOS). Say **"hey pi"** or
   long silence (local spotter limitation). "hey pi, send" goes through STT and
   is the dependable path.
 
+## Push-to-talk (global hotkey)
+
+Hold **Ctrl+Option+Space** anywhere to talk, release to send — no wake word
+needed. The combo works globally while voice listening is on (`/voice on`).
+Pauses while held are fine: end-of-speech only commits on release. Releasing
+with no speech cancels quietly without submitting anything. The same capture
+rules apply: `auto` mode submits immediately, `review` mode stages the text
+in the editor.
+
+- Change it: `/voice ptt <combo>` (e.g. `/voice ptt ctrl+shift+f19`);
+  disable it: `/voice ptt off`. Bare `/voice ptt` shows the current combo.
+- The hotkey listener is a small native helper built by `/voice setup`
+  (Carbon global hotkey, no permission prompts). If the combo is already
+  taken, voice tells you once and you can pick another combo.
+
 ## Privacy and cost
 
 - Wake detection runs fully on-device; no audio leaves the machine until the
@@ -49,7 +64,7 @@ Voice wake-word input + speech output for Pi (macOS). Say **"hey pi"** or
   ElevenLabs TTS) and `INWORLD_API_KEY` (Inworld TTS). They are never
   stored, logged, or shown (status shows the last 4 characters only).
 - Preferences (TTS provider, voice, wake phrase, sensitivity, mic,
-  autostart, TTS, TTS model, send mode) live in
+  autostart, TTS, TTS model, send mode, push-to-talk combo) live in
   `~/Library/Application Support/pi-voice/state.json`.
   No transcripts, audio, or keys are persisted there.
 
@@ -82,9 +97,9 @@ Prefer ElevenLabs for speech too? `export ELEVENLABS_API_KEY`, then
 
 | Input | Behavior |
 |---|---|
-| `/voice`, `/voice status` | Mic state, wake mode, device, TTS state, provider, voice, model, both key suffixes |
+| `/voice`, `/voice status` | Mic state, wake mode, device, TTS state, provider, voice, model, both key suffixes, push-to-talk combo |
 | `/voice on`, `/voice off` | Start/stop wake listening for this session |
-| `/voice setup` | Check binaries/env, provision the wake-word and VAD models, mic-permission guidance. Does not enable the mic |
+| `/voice setup` | Check binaries/env, provision the wake-word and VAD models, build the voice-isolation and push-to-talk helpers, mic-permission guidance. Does not enable the mic |
 | `/voice provider [inworld\|elevenlabs]` | Show or select the TTS provider (default `inworld`; STT stays ElevenLabs). Bare `/voice provider` shows the current provider |
 | `/voice tts on\|off` | Session speech toggle (saved); `on` needs the active provider's key (ElevenLabs also needs a selected voice) |
 | `/voice list` | List active-provider voices (needs that provider's key) |
@@ -96,8 +111,9 @@ Prefer ElevenLabs for speech too? `export ELEVENLABS_API_KEY`, then
 | `/voice mic list\|default\|<name>` | Pick by AVFoundation device name; quote names with spaces (`"iPhone Microphone"`). A missing saved mic falls back to default with a notice |
 | `/voice autostart on\|off` | Auto-listen at session start when the model is cached and the key is present (default on; never downloads at startup) |
 | `/voice isolation on\|off` | Echo-cancelling helper capture + playback (default on when built). Bare shows state and whether the helper is built |
+| `/voice ptt [off\|<combo>]` | Hold-to-talk global hotkey (default `ctrl+option+space`); bare shows the current combo |
+| `/voice speaker off\|low\|normal\|high\|forget\|learn on\|off\|that-was-me\|reset-learning` | Owner-voice check strictness (default `off`, experimental opt-in), delete the voice profile, toggle continuous learning, learn the last rejection as your voice, or clear learned samples |
 | `/voice enroll` | Guided owner-voice enrollment (cancel with `/voice off`; audio never written to disk) |
-| `/voice speaker off\|low\|normal\|high\|forget\|learn on\|off\|that-was-me\|reset-learning` | Owner-voice check strictness (default `normal`), delete the voice profile, toggle continuous learning, learn the last rejection as your voice, or clear learned samples |
 | `/voice send auto\|review` | `auto` submits transcripts immediately; `review` stages them in the Pi editor. Bare `/voice send` shows the current mode |
 | `/voice test mic\|wake\|stt\|tts\|speaker` | `mic`: 2 s capture with input level; `wake`: ~10 s offline listen (nothing submitted); `stt`: 8 s live capture reporting commit→transcript latency; `tts`: billable spoken test phrase; `speaker`: one utterance scored vs threshold, nothing submitted |
 | `/voice help` | This summary in-session |
@@ -134,7 +150,7 @@ the session. Notes:
 - Building requires the **Xcode command line tools** (`xcrun swiftc`):
   `xcode-select --install`.
 
-**Owner-voice check (speaker).** `/voice enroll` records
+**Owner-voice check (speaker; experimental, off by default).** The check is **off by default** — `/voice enroll` plus `/voice speaker low|normal|high` opts in if you want it. `/voice enroll` records
 a guided enrollment (6 longer sentences shown one at a time, each needing
 at least 2.5 s of speech — aim for 3+ s per clip, ~15–20 s total; too-short
 takes are repeated) and stores a
@@ -146,7 +162,7 @@ per phrase). At the end the pairwise clip-similarity matrix is summarized
 an error cue and a brief `🎙 not your voice`, and nothing is submitted (in
 review mode, nothing lands in the editor either).
 
-- Strictness: `/voice speaker off|low|normal|high` (default `normal`).
+- Strictness: `/voice speaker off|low|normal|high` (default `off`, experimental).
   Each level offsets the enrolled threshold by low −0.05 / normal +0 /
   high +0.05.
 - Thresholds are **provisional**: calibrate with `/voice test speaker`, which
@@ -254,5 +270,6 @@ enrollment audio lives only in memory and is never written to disk. Delete
    say "hey pi" → speech stops (barge-in).
 5. `/voice off` → `voice off`, mic process gone (`pgrep ffmpeg` empty).
 6. Restart Pi with autostart on → listening resumes without downloading.
-7. `/voice setup` → builds the voice-isolation helper (needs Xcode command line tools) and provisions the speaker model, reporting each result.
+7. `/voice setup` → builds the voice-isolation and push-to-talk helpers (needs Xcode command line tools) and provisions the speaker model, reporting each result.
+8. Hold Ctrl+Option+Space, speak, release → transcript submits once; release with no speech → cancels quietly.
 8. `/voice enroll` → reads back 6 sentences, flags outliers for re-recording, then reports scores, the pairwise summary, and the threshold; `/voice test speaker` → score vs threshold, nothing submitted.

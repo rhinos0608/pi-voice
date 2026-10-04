@@ -238,14 +238,14 @@ describe("preferences", () => {
     }
   });
 
-  it("isolation defaults on and speakerCheck defaults to normal", async () => {
+  it("isolation defaults on and speakerCheck defaults to off", async () => {
     const dir = freshDir();
     try {
       const { writeFileSync } = await import("node:fs");
       writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1 }));
       const loaded = await loadPreferences(dir);
       assert.equal(loaded.prefs.isolation, true);
-      assert.equal(loaded.prefs.speakerCheck, "normal");
+      assert.equal(loaded.prefs.speakerCheck, "off");
       assert.equal(loaded.warning, undefined);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -261,8 +261,23 @@ describe("preferences", () => {
       assert.equal(legacy.prefs.wake, "hey-pi");
       assert.equal(legacy.prefs.voiceId, "v1");
       assert.equal(legacy.prefs.isolation, true);
-      assert.equal(legacy.prefs.speakerCheck, "normal");
+      assert.equal(legacy.prefs.speakerCheck, "off");
       assert.equal(legacy.warning, undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stored speakerCheck values (including normal) load unchanged", async () => {
+    const dir = freshDir();
+    try {
+      const { writeFileSync } = await import("node:fs");
+      for (const level of ["off", "low", "normal", "high"] as const) {
+        writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, speakerCheck: level }));
+        const loaded = await loadPreferences(dir);
+        assert.equal(loaded.prefs.speakerCheck, level);
+        assert.equal(loaded.warning, undefined);
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -279,7 +294,33 @@ describe("preferences", () => {
       writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, isolation: "yes", speakerCheck: "bogus" }));
       const invalid = await loadPreferences(dir);
       assert.equal(invalid.prefs.isolation, true);
-      assert.equal(invalid.prefs.speakerCheck, "normal");
+      assert.equal(invalid.prefs.speakerCheck, "off");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("push-to-talk defaults, round-trips, and falls back on invalid values", async () => {
+    assert.equal(DEFAULT_PREFERENCES.pushToTalk, "ctrl+option+space");
+    const dir = freshDir();
+    try {
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, wake: "hey-pi" }));
+      const legacy = await loadPreferences(dir);
+      assert.equal(legacy.prefs.wake, "hey-pi");
+      assert.equal(legacy.prefs.pushToTalk, "ctrl+option+space");
+      assert.equal(legacy.warning, undefined);
+      await savePreferences({ ...DEFAULT_PREFERENCES, pushToTalk: "ctrl+shift+f19" }, dir);
+      const reloaded = await loadPreferences(dir);
+      assert.equal(reloaded.prefs.pushToTalk, "ctrl+shift+f19");
+      await savePreferences({ ...DEFAULT_PREFERENCES, pushToTalk: "off" }, dir);
+      const disabled = await loadPreferences(dir);
+      assert.equal(disabled.prefs.pushToTalk, "off");
+      for (const bad of ["ctrl", "ctrl+bogus", "", 42]) {
+        writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, pushToTalk: bad }));
+        const fallback = await loadPreferences(dir);
+        assert.equal(fallback.prefs.pushToTalk, "ctrl+option+space", JSON.stringify(bad));
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

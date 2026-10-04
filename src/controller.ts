@@ -171,6 +171,10 @@ export class VoiceController {
   private speechHeard = false;
   /** True between VAD onSpeechStart and onSpeechEnd: only then is capture audio speech. */
   private vadSpeechOpen = false;
+  /** Push-to-talk hold state: true between a matched down/up pair. */
+  private pttHeld = false;
+  /** True when the in-flight capture was started (or converted) by push-to-talk. */
+  private pttCapture = false;
   private speakerGate: {
     push(pcm: Buffer): void;
     decision(): "accept" | "reject" | "pending";
@@ -290,6 +294,12 @@ export class VoiceController {
   private setPhase(next: VoicePhase, status: string | undefined): void {
     if (this.phase !== next) this.log("phase", { from: this.phase, to: next });
     this.phase = next;
+    // Leaving capture (or going off) ends any push-to-talk hold: a later up
+    // is stray and the next capture starts unmarked unless PTT opens it.
+    if (next === "wake" || next === "off") {
+      this.pttHeld = false;
+      this.pttCapture = false;
+    }
     this.host.setStatus(status);
   }
 
@@ -580,6 +590,17 @@ export class VoiceController {
       this.onSendSpotter();
       return;
     }
+    this.beginCapture({ ptt: false });
+  }
+
+  /**
+   * Open a fresh capture: cancel speech/barge-in, cue, open the utterance
+   * and the endpointer, arm the speaker gate and the no-speech timeout.
+   * Shared by wake-word entry and push-to-talk (ptt marks the capture).
+   * Returns true when capture opened.
+   */
+  private beginCapture(opts: { ptt: boolean }): boolean {
+    if (!opts.ptt) this.pttHeld = false;
     const gen = ++this.generation;
     this.clearTimer();
     this.clearNoSpeechTimer();
@@ -589,7 +610,7 @@ export class VoiceController {
     if (!key) {
       this.host.notify("Export ELEVENLABS_API_KEY and restart Pi.", "warning");
       this.setPhase("wake", "🎙 listening");
-      return;
+      return false;
     }
     (this.deps.playCue ?? defaultPlayCue)();
     const old = this.utterance;
@@ -599,6 +620,7 @@ export class VoiceController {
     this.committed = false;
     this.speechHeard = false;
     this.vadSpeechOpen = false;
+    this.pttCapture = opts.ptt;
     this.maybeArmSpeakerGate();
     this.lastPartial = "";
     this.meter.reset();
@@ -616,12 +638,76 @@ export class VoiceController {
         { code: "network", message: err instanceof Error ? err.message : String(err), retryable: true },
         gen,
       );
-      return;
+      return false;
     }
     this.openEndpointer(gen);
     this.setPhase("capture", this.captureStatusText());
     this.lastStatusAt = this.now();
     this.armNoSpeechTimer(gen);
+    return true;
+  }
+
+  /**
+   * Push-to-talk press. From wake/speaking this opens a PTT-marked capture
+   * (same entry as a wake: barge-in, cue, utterance, endpointer, speaker
+   * gate); during a wake-started capture it converts the capture to
+   * push-to-talk. Ignored when PTT is off, while preparing/transcribing,
+   * or when closed. Repeat presses while held are ignored.
+   */
+  pushToTalkDown(): void {
+    if (this.closed || this.pttHeld) return;
+    const raw = this.deps.getPrefs().pushToTalk;
+    if (typeof raw !== "string" || raw === "off") return;
+    if (this.phase === "wake" || this.phase === "speaking") {
+      this.log("ptt", { event: "down" });
+      if (this.beginCapture({ ptt: true })) this.pttHeld = true;
+      return;
+    }
+    if (this.phase === "capture") {
+      // Transcribing (committed) captures keep their VAD-driven ending.
+      if (this.committed || !this.utterance) return;
+      this.pttHeld = true;
+      this.pttCapture = true;
+      this.log("ptt", { event: "down-convert" });
+    }
+    // off / preparing / submit: ignore.
+  }
+
+  /**
+   * Push-to-talk release. Commits now when speech was heard (same path as
+   * VAD end-of-speech) or cancels quietly back to wake when nothing was
+   * heard. A release without a matching press is ignored.
+   */
+  pushToTalkUp(): void {
+    if (!this.pttHeld) return;
+    this.pttHeld = false;
+    // A stop/restart/barge-in while held already reset the hold via setPhase.
+    if (this.phase !== "capture" || !this.pttCapture) return;
+    const utterance = this.utterance;
+    const gen = this.generation;
+    this.pttCapture = false;
+    if (!utterance) return;
+    if (!this.speechHeard) {
+      this.log("ptt", { event: "up-cancel" });
+      this.acceptedVoice = null;
+      this.closeUtterance();
+      this.closeEndpointer();
+      this.clearNoSpeechTimer();
+      if (this.closed || gen !== this.generation) return;
+      this.setPhase("wake", "🎙 listening");
+      return;
+    }
+    this.log("ptt", { event: "up-commit" });
+    this.vadSpeechOpen = false;
+    if (!this.settleSpeakerGate("end")) return;
+    try {
+      utterance.commit();
+    } catch {
+      // Commit failure surfaces via STT failure paths.
+    }
+    this.committed = true;
+    this.lastStatusAt = this.now();
+    this.host.setStatus("🎙 transcribing…");
   }
 
   private onSendSpotter(): void {
@@ -686,6 +772,11 @@ export class VoiceController {
           if (this.closed || gen !== this.generation || this.phase !== "capture") return;
           this.vadSpeechOpen = false;
           this.log("vad-end", { atSec });
+          // While the key is held the release commits; pauses are fine.
+          if (this.pttHeld && this.pttCapture) {
+            this.log("ptt", { event: "vad-end-held" });
+            return;
+          }
           if (!this.settleSpeakerGate("end")) return;
           try {
             this.utterance?.commit();
@@ -711,6 +802,11 @@ export class VoiceController {
     this.noSpeechTimer = this.timers.set(() => {
       this.noSpeechTimer = null;
       if (this.closed || gen !== this.generation || this.phase !== "capture" || this.speechHeard) return;
+      // While the key is held the release decides; pauses are fine.
+      if (this.pttHeld && this.pttCapture) {
+        this.log("ptt", { event: "no-speech-held" });
+        return;
+      }
       this.log("no-speech", { timeoutMs: ms });
       this.closeUtterance();
       this.closeEndpointer();
@@ -1205,6 +1301,9 @@ export class VoiceController {
   /** A new user turn cancels playback (barge-in by typing). */
   onInput(): void {
     if (this.closed) return;
+    // Typing barge-in while held releases the push-to-talk hold.
+    this.pttHeld = false;
+    this.pttCapture = false;
     if (this.speechQueue.length === 0) return;
     this.cancelSpeech();
     if (this.phase === "speaking") this.setPhase("wake", "🎙 listening");

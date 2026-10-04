@@ -10,6 +10,7 @@ import { cosineSimilarity, LEARN, MIN_ENROLL_CLIPS, addCorrection, learnedCount,
 import { DEFAULT_TTS_MODEL } from "./tts.ts";
 import { DEFAULT_INWORLD_MODEL, DEFAULT_INWORLD_VOICE, INWORLD_TTS_MODELS } from "./inworld-tts.ts";
 import type { VoiceController } from "./controller.ts";
+import { DEFAULT_PUSH_TO_TALK, parseHotkeyCombo } from "./hotkey.ts";
 import { OFFLINE_TTS_MODELS, type VoiceEntry } from "./elevenlabs-api.ts";
 import { resolveTtsModelId, resolveTtsVoiceId, ttsProviderOf } from "./preferences.ts";
 
@@ -106,6 +107,11 @@ export type CommandEnv = {
     hadFallback(): boolean;
     ensureHelper(signal: AbortSignal): Promise<string>;
   };
+  /** Push-to-talk hotkey helper state. Absent in older harnesses; setup skips the hotkey build. */
+  hotkey?: {
+    helperBuilt(): boolean;
+    ensureHelper(signal: AbortSignal): Promise<string>;
+  };
   /** Owner-voice enrollment and verification. Absent in older harnesses. */
   speaker?: {
     loadProfile(): Promise<SpeakerProfile | undefined>;
@@ -129,7 +135,7 @@ export type CommandEnv = {
 export type ParsedVoiceCommand =
   | { sub: "status" | "on" | "off" | "setup" | "help" }
   | { sub: "tts" | "autostart" | "send" | "provider" | "isolation" | "speaker"; value?: string }
-  | { sub: "model" | "wake" | "sensitivity" | "mic" | "test" | "list" | "id"; value?: string }
+  | { sub: "model" | "wake" | "sensitivity" | "mic" | "test" | "list" | "id" | "ptt"; value?: string }
   | { sub: "enroll" };
 
 /** Split raw slash args into a subcommand and its remainder. */
@@ -153,6 +159,7 @@ export function parseVoiceArgs(args: string): ParsedVoiceCommand {
     case "provider":
     case "isolation":
     case "speaker":
+    case "ptt":
     case "list":
     case "model":
     case "wake":
@@ -183,6 +190,7 @@ const SUBCOMMANDS = [
   "provider",
   "isolation",
   "enroll",
+  "ptt",
   "speaker",
   "test",
   "list",
@@ -286,6 +294,8 @@ async function completeArgumentValue(
     case "autostart":
     case "isolation":
       return completeValues(["on", "off"]);
+    case "ptt":
+      return completeValues(["off", DEFAULT_PUSH_TO_TALK]);
     case "wake":
       return completeValues(["hey-pi", "hi-pi", "both"]);
     case "sensitivity":
@@ -374,7 +384,8 @@ function prefsSummary(
     `  autostart: ${prefs.autostart ? "on" : "off"}`,
     `  send mode: ${prefs.sendMode}`,
     `  isolation: ${prefs.isolation ? "on" : "off"}`,
-    `  speaker check: ${prefs.speakerCheck}`,
+    `  speaker check: ${prefs.speakerCheck}${prefs.speakerCheck === "off" ? " (off by default, experimental)" : ""}`,
+    `  push-to-talk: ${prefs.pushToTalk ?? DEFAULT_PUSH_TO_TALK}`,
     keyLine("elevenlabs", eleven),
     keyLine("inworld", inworld),
   ].join("\n");
@@ -506,6 +517,21 @@ export function currentSpeakerCapture(env: CommandEnv): "raw" | "processed" {
  */
 const SPEAKER_TEST_PHRASE =
   "Pack my box with five dozen liquor jugs before the delivery truck leaves the warehouse this afternoon";
+
+/** Current push-to-talk combo and listener state for `/voice ptt` and status. */
+function describePushToTalk(env: CommandEnv): string {
+  const prefs = env.getPrefs();
+  const combo = typeof prefs.pushToTalk === "string" ? prefs.pushToTalk : DEFAULT_PUSH_TO_TALK;
+  if (combo === "off") return "push-to-talk: off";
+  let label = combo;
+  try {
+    label = parseHotkeyCombo(combo).label;
+  } catch {
+    // Stored value predates validation; show it raw.
+  }
+  const listening = typeof env.controller.getPhase === "function" ? env.controller.getPhase() !== "off" : true;
+  return `push-to-talk: ${label} — hold to talk, release to send (${listening ? "listening" : "not listening"})`;
+}
 
 async function describeSpeaker(env: CommandEnv): Promise<string> {
   const prefs = env.getPrefs();
@@ -843,6 +869,14 @@ export async function handleVoiceCommand(
           lines.push(`speaker model: failed — ${err instanceof Error ? err.message : String(err)}`);
         }
       }
+      if (env.hotkey) {
+        try {
+          const helperPath = await env.hotkey.ensureHelper(new AbortController().signal);
+          lines.push(`push-to-talk helper: built (${helperPath})`);
+        } catch (err) {
+          lines.push(`push-to-talk helper: failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       lines.push("mic permission: grant the terminal app Microphone access in System Settings > Privacy & Security > Microphone, then restart.");
       lines.push("setup does not enable the mic; run /voice on when ready.");
       ctx.notify(lines.join("\n"), "info");
@@ -864,6 +898,7 @@ export async function handleVoiceCommand(
           "/voice autostart on|off",
           '/voice send auto|review — review: dictation goes to the editor; Enter or "send to pi" submits; "hey pi, send" also works',
           "/voice isolation on|off — echo-cancelling helper capture + playback (bare shows helper state)",
+          "/voice ptt [off|<combo>] — hold-to-talk hotkey (default ctrl+option+space); bare shows the current combo",
           "/voice enroll — guided owner-voice enrollment (cancellable with /voice off)",
           "/voice speaker off|low|normal|high|forget|learn on|off|that-was-me|reset-learning — strictness, delete the voice profile, toggle learning, learn the last rejection as your voice, or clear learned samples",
           "/voice test mic|wake|tts|stt|speaker — tts is billable; speaker submits nothing",
@@ -1140,6 +1175,34 @@ export async function handleVoiceCommand(
       });
       await env.controller.restartIfListening();
       ctx.notify(await describeSpeaker(env), "info");
+      return;
+    }
+    case "ptt": {
+      const value = parsed.value;
+      if (value === undefined) {
+        ctx.notify(describePushToTalk(env), "info");
+        return;
+      }
+      if (value.toLowerCase() === "off") {
+        const next = await env.mutatePrefs((prefs) => {
+          prefs.pushToTalk = "off";
+        });
+        void next;
+        ctx.notify("push-to-talk: off", "info");
+        return;
+      }
+      let label: string;
+      try {
+        label = parseHotkeyCombo(value).label;
+      } catch (err) {
+        ctx.notify(err instanceof Error ? err.message : String(err), "warning");
+        return;
+      }
+      const next = await env.mutatePrefs((prefs) => {
+        prefs.pushToTalk = value.trim().toLowerCase();
+      });
+      void next;
+      ctx.notify(`push-to-talk: ${label} — hold to talk, release to send`, "info");
       return;
     }
     case "test": {

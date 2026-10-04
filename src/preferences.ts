@@ -4,6 +4,21 @@ import { dirname, join } from "node:path";
 import { DEFAULT_PREFERENCES, type TtsProvider, type VoicePreferences } from "./contracts.ts";
 import { DEFAULT_INWORLD_MODEL, DEFAULT_INWORLD_VOICE } from "./inworld-tts.ts";
 import { DEFAULT_TTS_MODEL } from "./tts.ts";
+import { DEFAULT_PUSH_TO_TALK, parseHotkeyCombo } from "./hotkey.ts";
+
+/** Stored push-to-talk value is valid when "off" or a parseable combo; otherwise the default applies. */
+export function normalizePushToTalk(raw: unknown): string {
+  if (raw === "off") return "off";
+  if (typeof raw === "string") {
+    try {
+      parseHotkeyCombo(raw);
+      return raw;
+    } catch {
+      return DEFAULT_PUSH_TO_TALK;
+    }
+  }
+  return DEFAULT_PUSH_TO_TALK;
+}
 
 const STATE_REL = join("Library", "Application Support", "pi-voice", "state.json");
 const API_KEY_ENV = "ELEVENLABS_API_KEY";
@@ -52,6 +67,7 @@ function withDefaults(raw: unknown): VoicePreferences {
         ? r["speakerCheck"]
         : DEFAULT_PREFERENCES.speakerCheck,
     speakerLearn: typeof r["speakerLearn"] === "boolean" ? r["speakerLearn"] : DEFAULT_PREFERENCES.speakerLearn,
+    pushToTalk: normalizePushToTalk(r["pushToTalk"]),
   };
 }
 

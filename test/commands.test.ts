@@ -582,7 +582,7 @@ describe("isolation and speaker commands", () => {
     await handleVoiceCommand("speaker", ctxFor(bag.notified), bag.env);
     assert.ok(
       bag.notified.some((n) =>
-        new RegExp(`speaker: normal, learning on, enrolled 2026-01-02.*learned 0/${LEARN.maxLearned}`).test(n.message),
+        new RegExp(`speaker: off, learning on, enrolled 2026-01-02.*learned 0/${LEARN.maxLearned}`).test(n.message),
       ),
       JSON.stringify(bag.notified),
     );
@@ -610,7 +610,7 @@ describe("isolation and speaker commands", () => {
     assert.ok(text.includes('Enroll 1/6: read aloud'));
     assert.ok(text.includes('Enroll 6/6: read aloud'));
     assert.equal(sp.saved.length, 1);
-    assert.ok(/Enrolled 6 clips. Scores: .* Threshold: suggested 0\.78 \(effective 0\.78 at normal\)\./.test(text));
+    assert.ok(/Enrolled 6 clips. Scores: .* Threshold: suggested 0\.78 \(effective 0\.78 at off\)\./.test(text));
     assert.ok(/Pairwise clip similarity: mean 1\.00, min 1\.00 \(6 clips\)/.test(text), text);
     assert.equal(starts, 1);
   });
@@ -706,7 +706,7 @@ describe("isolation and speaker commands", () => {
   });
 
   it("test speaker prompts for a ~4 s phrase and reports score vs threshold", async () => {
-    const bag = makeEnv();
+    const bag = makeEnv({ prefs: { speakerCheck: "normal" } });
     makeSpokedEnv(bag);
     await handleVoiceCommand("test speaker", ctxFor(bag.notified), bag.env);
     const text = bag.notified.map((n) => n.message).join("\n");
@@ -717,7 +717,7 @@ describe("isolation and speaker commands", () => {
   });
 
   it("test speaker uses the gate scoring (exemplar), not raw centroid cosine", async () => {
-    const bag = makeEnv();
+    const bag = makeEnv({ prefs: { speakerCheck: "normal" } });
     makeSpokedEnv(bag, {
       profile: {
         version: 1,
@@ -742,7 +742,7 @@ describe("isolation and speaker commands", () => {
   });
 
   it("test speaker too-short reports captured speech ms and asks for a longer phrase", async () => {
-    const bag = makeEnv();
+    const bag = makeEnv({ prefs: { speakerCheck: "normal" } });
     makeSpokedEnv(bag, {
       captureImpl: async (): Promise<CaptureResult> => ({ status: "too-short", speechMs: 400 }),
     });
@@ -961,7 +961,7 @@ describe("isolation and speaker commands", () => {
     await handleVoiceCommand("status", ctxFor(bag.notified), bag.env);
     const text = bag.notified.map((n) => n.message).join("\n");
     assert.ok(text.includes("isolation: on (helper built"));
-    assert.ok(text.includes("speaker: normal, learning on, enrolled 2026-01-02"));
+    assert.ok(text.includes("speaker: off, learning on, enrolled 2026-01-02"));
     assert.ok(text.includes(`learned 0/${LEARN.maxLearned}`));
   });
 });
@@ -1280,5 +1280,88 @@ describe("speaker profile store (authoritative in-memory profile)", () => {
     store.setCurrent(fakeProfile("x"));
     await store.clearAndDelete();
     assert.deepEqual(order, ["cleared-first"]);
+  });
+});
+
+describe("push-to-talk commands", () => {
+  it("parses ptt with an optional value", () => {
+    assert.deepEqual(parseVoiceArgs("ptt"), { sub: "ptt", value: undefined });
+    assert.deepEqual(parseVoiceArgs("ptt off"), { sub: "ptt", value: "off" });
+    assert.deepEqual(parseVoiceArgs("ptt ctrl+option+space"), { sub: "ptt", value: "ctrl+option+space" });
+  });
+
+  it("bare ptt shows the current combo and state", async () => {
+    const bag = makeEnv();
+    await handleVoiceCommand("ptt", ctxFor(bag.notified), bag.env);
+    assert.ok(
+      bag.notified.some((n) => n.message.includes("ctrl+option+space") || n.message.includes("Ctrl+Option+Space")),
+      JSON.stringify(bag.notified),
+    );
+    const off = makeEnv({ prefs: { pushToTalk: "off" } });
+    await handleVoiceCommand("ptt", ctxFor(off.notified), off.env);
+    assert.ok(off.notified.some((n) => n.message.includes("push-to-talk: off")), JSON.stringify(off.notified));
+  });
+
+  it("ptt off disables and a valid combo saves", async () => {
+    const bag = makeEnv();
+    await handleVoiceCommand("ptt off", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.pushToTalk, "off");
+    assert.ok(bag.notified.some((n) => n.message.includes("push-to-talk: off")));
+    await handleVoiceCommand("ptt ctrl+shift+f19", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.pushToTalk, "ctrl+shift+f19");
+    assert.ok(bag.notified.some((n) => n.message.includes("Ctrl+Shift+F19")));
+  });
+
+  it("an invalid combo reports a clear error and saves nothing", async () => {
+    const bag = makeEnv();
+    const before = bag.prefs.pushToTalk;
+    const savedBefore = bag.saved.length;
+    await handleVoiceCommand("ptt ctrl", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.pushToTalk, before);
+    assert.equal(bag.saved.length, savedBefore);
+    assert.ok(bag.notified.some((n) => n.type === "warning" && n.message.includes("modifier-only")));
+    await handleVoiceCommand("ptt ctrl+bogus", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.pushToTalk, before);
+    assert.ok(bag.notified.some((n) => n.type === "warning" && n.message.includes('unknown key "bogus"')));
+  });
+
+  it("ptt completes off and the default combo", async () => {
+    const { env } = makeEnv();
+    const items = await getVoiceCompletions("ptt ", env);
+    assert.deepEqual(items?.map((i) => i.value).sort(), ["ptt ctrl+option+space", "ptt off"]);
+  });
+
+  it("status shows the push-to-talk combo and help documents ptt", async () => {
+    const { env, notified } = makeEnv();
+    await handleVoiceCommand("status", ctxFor(notified), env);
+    assert.ok(notified.some((n) => n.message.includes("push-to-talk")));
+    const help: { message: string; type?: string }[] = [];
+    await handleVoiceCommand("help", ctxFor(help), env);
+    assert.ok(help.some((n) => n.message.includes("/voice ptt")));
+  });
+
+  it("setup builds the hotkey helper and reports it", async () => {
+    const bag = makeEnv();
+    const probe = { ...bag.env, hotkey: { helperBuilt: () => true, ensureHelper: async () => "/tmp/bin/hotkey-abc" } };
+    await handleVoiceCommand("setup", ctxFor(bag.notified), probe);
+    assert.ok(
+      bag.notified.some((n) => n.message.includes("push-to-talk helper: built")),
+      JSON.stringify(bag.notified),
+    );
+    const failing = makeEnv();
+    const failingProbe = {
+      ...failing.env,
+      hotkey: {
+        helperBuilt: () => false,
+        ensureHelper: async (): Promise<string> => {
+          throw new Error("xcrun missing");
+        },
+      },
+    };
+    await handleVoiceCommand("setup", ctxFor(failing.notified), failingProbe);
+    assert.ok(
+      failing.notified.some((n) => n.message.includes("push-to-talk helper: failed")),
+      JSON.stringify(failing.notified),
+    );
   });
 });

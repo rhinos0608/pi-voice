@@ -32,6 +32,7 @@ import {
   createSpeakerStore,
   type CommandEnv,
 } from "./commands.ts";
+import { createHotkeyListener, ensureHotkeyHelper, hotkeyHelperPath, type HotkeyListener } from "./hotkey.ts";
 import { listTtsModels, listVoices } from "./elevenlabs-api.ts";
 import { listInworldVoices } from "./inworld-api.ts";
 
@@ -520,6 +521,10 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       inworldKeyLast4: () => inworldKeyStatus().last4,
       listInworldVoices: (key) => listInworldVoices(key),
       runTest: (kind) => runLiveTest(kind, prefs),
+      hotkey: {
+        helperBuilt: () => hotkeyHelperPath() !== undefined,
+        ensureHelper: (signal) => ensureHotkeyHelper({ signal }),
+      },
       voiceIo: {
         helperBuilt: () => voiceIoHelperPath() !== undefined,
         isActive: () => voiceIoInUse,
@@ -537,6 +542,89 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         capturePhrase: (prompt, opts) => captureEnrollmentPhrase(prompt, opts),
       },
     };
+  }
+
+  // Global push-to-talk listener: runs only while voice listening is on.
+  // Listener errors never break the voice session; notices fire once per cause.
+  let hotkeyListener: HotkeyListener | null = null;
+  let hotkeyCombo: string | null = null;
+  let hotkeyNotifyKey: string | null = null;
+
+  function notifyHotkeyOnce(key: string, message: string, type: "info" | "warning" | "error"): void {
+    if (hotkeyNotifyKey === key) return;
+    hotkeyNotifyKey = key;
+    host.notify(message, type);
+  }
+
+  async function closeHotkeyListener(): Promise<void> {
+    // Finish an in-flight hold before tearing down the listener: without
+    // this, pttHeld stays true and VAD end-of-speech plus the no-speech
+    // timeout stay suppressed until the STT max-duration cap. pushToTalkUp
+    // commits when speech was heard and cancels quietly otherwise; it is a
+    // no-op when no hold is active or the phase already left capture (so
+    // turning voice off still behaves as today — setPhase cleared the hold).
+    try {
+      controller.pushToTalkUp();
+    } catch {
+      // Release is best-effort; listener teardown proceeds regardless.
+    }
+    const active = hotkeyListener;
+    hotkeyListener = null;
+    hotkeyCombo = null;
+    if (active) await active.close().catch(() => undefined);
+  }
+
+  async function syncHotkeyListener(): Promise<void> {
+    const combo = prefs.pushToTalk ?? DEFAULT_PREFERENCES.pushToTalk;
+    if (controller.getPhase() === "off" || combo === "off") {
+      await closeHotkeyListener();
+      return;
+    }
+    if (hotkeyListener && hotkeyCombo === combo) return;
+    await closeHotkeyListener();
+    const helperPath = hotkeyHelperPath();
+    if (!helperPath) {
+      notifyHotkeyOnce("missing", "Push-to-talk helper not built: run /voice setup to build it.", "warning");
+      return;
+    }
+    let listener: HotkeyListener;
+    try {
+      listener = createHotkeyListener({
+        helperPath,
+        combo,
+        onDown: () => controller.pushToTalkDown(),
+        onUp: () => controller.pushToTalkUp(),
+        onError: (err) => {
+          notifyHotkeyOnce(
+            `error:${combo}:${err.message}`,
+            `Push-to-talk listener error: ${err.message} — pick another combo with /voice ptt <combo>.`,
+            "warning",
+          );
+        },
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      notifyHotkeyOnce(`spawn:${combo}:${detail}`, `Push-to-talk hotkey "${combo}" failed: ${detail}`, "warning");
+      return;
+    }
+    hotkeyListener = listener;
+    hotkeyCombo = combo;
+    try {
+      await listener.ready;
+    } catch (err) {
+      if (hotkeyListener === listener) {
+        hotkeyListener = null;
+        hotkeyCombo = null;
+      }
+      await listener.close().catch(() => undefined);
+      const detail = err instanceof Error ? err.message : String(err);
+      // A taken combo surfaces here as a registration error.
+      notifyHotkeyOnce(
+        `ready:${combo}:${detail}`,
+        `Push-to-talk hotkey "${combo}" failed: ${detail} — pick another combo with /voice ptt <combo>.`,
+        "warning",
+      );
+    }
   }
 
   pi.registerCommand("voice", {
@@ -572,6 +660,9 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       // reset-learning in this command sees the latest profile, not a stale disk copy.
       await controller.flushSpeakerLearning();
       await refreshSpeakerState();
+      // (Re)start or stop the push-to-talk listener: /voice on|off and
+      // /voice ptt changes take effect without touching the voice session.
+      await syncHotkeyListener();
     },
   });
 
@@ -590,6 +681,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     const provisioned = (await isWakeModelProvisioned()) && (await isVadModelProvisioned());
     if (prefs.autostart && provisioned && key) {
       await controller.start();
+      await syncHotkeyListener();
       return;
     }
     ctx.ui.setStatus(STATUS_KEY, SETUP_HINT);
@@ -597,6 +689,7 @@ export default function voiceExtension(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     liveCtx = ctx;
+    await closeHotkeyListener();
     await controller.shutdown();
     const io = voiceIoHandle;
     voiceIoHandle = null;
