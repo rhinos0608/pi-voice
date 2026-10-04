@@ -343,4 +343,36 @@ describe("tts startSpeech", () => {
       }
     }
   });
+
+  it("routes a sink.write() rejection to onFailure once, never onDone", async () => {
+    const socket = new FakeSocket();
+    const failures: VoiceFailure[] = [];
+    const done = { count: 0 };
+    const sink: AudioSink = {
+      async start(): Promise<void> {},
+      async write(): Promise<void> {
+        throw new Error("boom");
+      },
+      async finish(): Promise<void> {},
+      async stop(): Promise<void> {},
+    };
+    startSpeech(
+      { key: "k", voiceId: "v", onDone: (): void => {
+        done.count += 1;
+      }, onFailure: (f: VoiceFailure): void => {
+        failures.push(f);
+      } },
+      {
+        socketFactory: (): TtsSocket => socket as unknown as TtsSocket,
+        sinkFactory: (): AudioSink => sink,
+      },
+    );
+    socket.emit("open", undefined);
+    socket.emit("message", JSON.stringify({ audio: Buffer.from([1, 2]).toString("base64") }));
+    socket.emit("message", JSON.stringify({ audio: Buffer.from([3, 4]).toString("base64") }));
+    socket.emit("message", JSON.stringify({ audio: null }));
+    for (let i = 0; i < 5; i += 1) await tick();
+    assert.equal(failures.length, 1);
+    assert.equal(done.count, 0);
+  });
 });

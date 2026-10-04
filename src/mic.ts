@@ -78,6 +78,41 @@ export type AvFoundationSource = AudioSource & {
   resolvedInput: string | undefined;
 };
 
+/**
+ * Wrap a primary AudioSource with a one-way session fallback (voice-isolation
+ * helper -> ffmpeg). The first start() failure matching shouldFallback swaps
+ * to createFallback() permanently; later starts go straight to the fallback.
+ * Non-matching errors (e.g. permission) propagate to existing guidance.
+ */
+export function withSessionFallback(opts: {
+  primary: AudioSource;
+  createFallback: () => AudioSource;
+  shouldFallback: (err: unknown) => boolean;
+  onFallback: () => void;
+  onPrimaryStart?: () => void;
+}): AudioSource {
+  let current = opts.primary;
+  let usingPrimary = true;
+  return {
+    start: async (onPcm: (chunk: Buffer) => void, onError: (error: Error) => void): Promise<void> => {
+      try {
+        await current.start(onPcm, onError);
+        if (usingPrimary) opts.onPrimaryStart?.();
+      } catch (err) {
+        if (usingPrimary && opts.shouldFallback(err)) {
+          usingPrimary = false;
+          opts.onFallback();
+          current = opts.createFallback();
+          await current.start(onPcm, onError);
+        } else {
+          throw err;
+        }
+      }
+    },
+    stop: () => current.stop(),
+  };
+}
+
 /** Classified microphone failure. All onError paths use this type. */
 export type MicErrorCode = "permission" | "stalled" | "exited" | "spawn" | "device";
 

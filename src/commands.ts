@@ -4,12 +4,18 @@
  * environment so tests run with fakes (no network, mic, or key).
  */
 
-import type { MicDevice, VoicePreferences } from "./contracts.ts";
+import type { MicDevice, TtsProvider, VoicePreferences } from "./contracts.ts";
+import { speakerThresholdFor } from "./contracts.ts";
+import { cosineSimilarity, MIN_ENROLL_CLIPS, type SpeakerProfile } from "./speaker.ts";
+import * as speakerConsts from "./speaker.ts";
 import { DEFAULT_TTS_MODEL } from "./tts.ts";
+import { DEFAULT_INWORLD_MODEL, DEFAULT_INWORLD_VOICE, INWORLD_TTS_MODELS } from "./inworld-tts.ts";
 import type { VoiceController } from "./controller.ts";
 import { OFFLINE_TTS_MODELS, type VoiceEntry } from "./elevenlabs-api.ts";
+import { resolveTtsModelId, resolveTtsVoiceId, ttsProviderOf } from "./preferences.ts";
 
 export const MISSING_KEY_MESSAGE = "Export ELEVENLABS_API_KEY and restart Pi.";
+export const MISSING_INWORLD_KEY_MESSAGE = "Export INWORLD_API_KEY and restart Pi.";
 
 export type AutocompleteItem = { value: string; label: string; description?: string };
 
@@ -17,6 +23,26 @@ export type CommandCtx = {
   notify(message: string, type?: "info" | "warning" | "error"): void;
   setStatus(key: string, text: string | undefined): void;
 };
+
+/** Guided-enrollment prompt count; follows the speaker module's recommendation when present. */
+const RECOMMENDED_ENROLL_CLIPS: number =
+  (speakerConsts as { RECOMMENDED_ENROLL_CLIPS?: number }).RECOMMENDED_ENROLL_CLIPS ?? 5;
+
+/** Short varied phrases read aloud during enrollment. Never written to disk. */
+const ENROLL_PHRASES: readonly string[] = [
+  "The quick brown fox jumps over the lazy dog",
+  "Pack my box with five dozen liquor jugs",
+  "How vexingly quick daft zebras jump",
+  "She sells seashells by the seashore",
+  "The five boxing wizards jump quickly",
+  "Weave a circle round him thrice",
+];
+
+/** Minimum speech per enrollment clip in ms; shorter captures are repeated. */
+const ENROLL_MIN_SPEECH_MS = 1500;
+
+/** Retries per phrase before enrollment aborts. */
+const ENROLL_MAX_REPEATS = 3;
 
 export type CommandEnv = {
   controller: VoiceController;
@@ -36,13 +62,44 @@ export type CommandEnv = {
   listVoices: (key: string) => Promise<VoiceEntry[]>;
   listModels: (key: string) => Promise<string[]>;
   getKey: () => string | undefined;
+  getTtsProvider: () => TtsProvider;
+  getInworldKey: () => string | undefined;
+  inworldKeyPresent: () => boolean;
+  inworldKeyLast4: () => string | undefined;
+  listInworldVoices: (key: string) => Promise<VoiceEntry[]>;
   runTest: (kind: "mic" | "wake" | "tts" | "stt") => Promise<string>;
+  /** Voice-isolation helper state. Absent in older harnesses; commands degrade to prefs-only output. */
+  voiceIo?: {
+    helperBuilt(): boolean;
+    isActive(): boolean;
+    hadFallback(): boolean;
+    ensureHelper(signal: AbortSignal): Promise<string>;
+  };
+  /** Owner-voice enrollment and verification. Absent in older harnesses. */
+  speaker?: {
+    loadProfile(): Promise<SpeakerProfile | undefined>;
+    saveProfile(profile: SpeakerProfile): Promise<void>;
+    deleteProfile(): Promise<void>;
+    ensureModel(signal: AbortSignal): Promise<string>;
+    modelCachedPath(): string | undefined;
+    createEmbedder(modelPath: string): { embed(pcm: Buffer): Float32Array };
+    buildProfile(embeddings: Float32Array[], model: string): SpeakerProfile;
+    capturePhrase(
+      prompt: string,
+      opts: { signal: AbortSignal },
+    ): Promise<
+      | { status: "ok"; pcm: Buffer; speechMs: number }
+      | { status: "too-short"; speechMs: number }
+      | { status: "cancelled" }
+    >;
+  };
 };
 
 export type ParsedVoiceCommand =
   | { sub: "status" | "on" | "off" | "setup" | "help" }
-  | { sub: "tts" | "autostart" | "send"; value?: string }
-  | { sub: "model" | "wake" | "sensitivity" | "mic" | "test" | "list" | "id"; value?: string };
+  | { sub: "tts" | "autostart" | "send" | "provider" | "isolation" | "speaker"; value?: string }
+  | { sub: "model" | "wake" | "sensitivity" | "mic" | "test" | "list" | "id"; value?: string }
+  | { sub: "enroll" };
 
 /** Split raw slash args into a subcommand and its remainder. */
 export function parseVoiceArgs(args: string): ParsedVoiceCommand {
@@ -62,6 +119,9 @@ export function parseVoiceArgs(args: string): ParsedVoiceCommand {
     case "tts":
     case "autostart":
     case "send":
+    case "provider":
+    case "isolation":
+    case "speaker":
     case "list":
     case "model":
     case "wake":
@@ -69,6 +129,7 @@ export function parseVoiceArgs(args: string): ParsedVoiceCommand {
     case "mic":
     case "test":
     case "id":
+    case "enroll":
       return { sub: head, value };
     default:
       return { sub: "id", value: args.trim() };
@@ -88,6 +149,10 @@ const SUBCOMMANDS = [
   "mic",
   "autostart",
   "send",
+  "provider",
+  "isolation",
+  "enroll",
+  "speaker",
   "test",
   "list",
   "id",
@@ -95,13 +160,13 @@ const SUBCOMMANDS = [
 ];
 
 async function matchVoices(
-  env: Pick<CommandEnv, "listVoices">,
+  list: (key: string) => Promise<VoiceEntry[]>,
   key: string,
   current: string,
 ): Promise<AutocompleteItem[] | null> {
   let voices: VoiceEntry[];
   try {
-    voices = await env.listVoices(key);
+    voices = await list(key);
   } catch {
     return null;
   }
@@ -122,13 +187,29 @@ function quoteName(name: string): string {
   return /\s/.test(name) ? `"${name}"` : name;
 }
 
+/** Environment needed for completions; provider fields optional so legacy probes keep working. */
+export type CompletionEnv = Pick<CommandEnv, "listDevices" | "listVoices" | "listModels" | "getKey"> & {
+  getTtsProvider?: () => TtsProvider;
+  getInworldKey?: () => string | undefined;
+  listInworldVoices?: (key: string) => Promise<VoiceEntry[]>;
+};
+
+/** Voice lister and key for the active TTS provider (ElevenLabs when unknown). */
+function activeVoiceSource(
+  env: CompletionEnv,
+): { list: (key: string) => Promise<VoiceEntry[]>; key: string | undefined } {
+  if (env.getTtsProvider?.() === "inworld" && env.listInworldVoices) {
+    return { list: (key) => (env.listInworldVoices as (key: string) => Promise<VoiceEntry[]>)(key), key: env.getInworldKey?.() };
+  }
+  return { list: (key) => env.listVoices(key), key: env.getKey() };
+}
 /**
  * Context-aware completions. Network-backed voice/model listings only run
  * while completing that same subcommand; every other position is local.
  */
 export async function getVoiceCompletions(
   argumentPrefix: string,
-  env: Pick<CommandEnv, "listDevices" | "listVoices" | "listModels" | "getKey">,
+  env: CompletionEnv,
 ): Promise<AutocompleteItem[] | null> {
   const { tokens, trailingSpace } = tokenize(argumentPrefix);
   const current = trailingSpace ? "" : (tokens[tokens.length - 1] ?? "");
@@ -138,9 +219,9 @@ export async function getVoiceCompletions(
   if (completingFirst) {
     const hits = SUBCOMMANDS.filter((s) => s.startsWith(current.toLowerCase()));
     const items = hits.map((value) => ({ value, label: value }));
-    const key = env.getKey();
+    const { list, key } = activeVoiceSource(env);
     if (key && !hits.includes(current.toLowerCase())) {
-      const voices = await matchVoices(env, key, current);
+      const voices = await matchVoices(list, key, current);
       if (voices) items.push(...voices);
     }
     return items;
@@ -156,7 +237,7 @@ export async function getVoiceCompletions(
 async function completeArgumentValue(
   head: string,
   current: string,
-  env: Pick<CommandEnv, "listDevices" | "listVoices" | "listModels" | "getKey">,
+  env: CompletionEnv,
 ): Promise<AutocompleteItem[] | null> {
   const completeValues = (options: string[]): AutocompleteItem[] | null => {
     const hits = options.filter((o) => o.toLowerCase().startsWith(current.toLowerCase()));
@@ -172,6 +253,7 @@ async function completeArgumentValue(
       return null;
     case "tts":
     case "autostart":
+    case "isolation":
       return completeValues(["on", "off"]);
     case "wake":
       return completeValues(["hey-pi", "hi-pi", "both"]);
@@ -179,8 +261,12 @@ async function completeArgumentValue(
       return completeValues(["low", "normal", "high"]);
     case "send":
       return completeValues(["auto", "review"]);
+    case "speaker":
+      return completeValues(["off", "low", "normal", "high", "forget"]);
+    case "provider":
+      return completeValues(["inworld", "elevenlabs"]);
     case "test":
-      return completeValues(["mic", "wake", "tts", "stt"]);
+      return completeValues(["mic", "wake", "tts", "stt", "speaker"]);
     case "mic": {
       const base = ["list", "default"];
       let devices: MicDevice[] = [];
@@ -196,12 +282,13 @@ async function completeArgumentValue(
     }
     case "list":
     case "id": {
-      const key = env.getKey();
+      const { list, key } = activeVoiceSource(env);
       if (!key) return null;
-      const voices = await matchVoices(env, key, current);
+      const voices = await matchVoices(list, key, current);
       return voices;
     }
     case "model": {
+      if (env.getTtsProvider?.() === "inworld") return completeValues([...INWORLD_TTS_MODELS]);
       const key = env.getKey();
       let models: string[];
       try {
@@ -222,20 +309,181 @@ function unquote(value: string): string {
   return t;
 }
 
-function prefsSummary(prefs: VoicePreferences, keyPresent: boolean, last4: string | undefined): string {
+export type KeySuffix = { present: boolean; last4?: string };
+
+function prefsSummary(
+  prefs: VoicePreferences,
+  eleven: KeySuffix,
+  inworld: KeySuffix,
+): string {
   const mic = prefs.mic.kind === "default" ? "default" : prefs.mic.name;
+  const provider = ttsProviderOf(prefs);
+  const voice = resolveTtsVoiceId(prefs);
+  const keyLine = (label: string, k: KeySuffix): string =>
+    `  ${label} key: ${k.present ? `present ••••${k.last4 ?? "????"}` : "missing"}`;
   return [
     "voice status:",
     `  mic: ${mic}`,
     `  wake: ${prefs.wake}`,
     `  sensitivity: ${prefs.sensitivity}`,
-    `  tts: ${prefs.tts ? "on" : "off"}${prefs.tts && !prefs.voiceId ? " (no voice selected)" : ""}`,
-    `  voice: ${prefs.voiceId ?? "(none)"}`,
-    `  tts model: ${prefs.ttsModel ?? DEFAULT_TTS_MODEL}`,
+    `  tts: ${prefs.tts ? "on" : "off"}${prefs.tts && provider === "elevenlabs" && !prefs.voiceId ? " (no voice selected)" : ""}`,
+    `  provider: ${provider}`,
+    `  voice: ${voice ?? "(none)"}`,
+    `  tts model: ${resolveTtsModelId(prefs)}`,
     `  autostart: ${prefs.autostart ? "on" : "off"}`,
     `  send mode: ${prefs.sendMode}`,
-    `  key: ${keyPresent ? `present ••••${last4 ?? "????"}` : "missing"}`,
+    `  isolation: ${prefs.isolation ? "on" : "off"}`,
+    `  speaker check: ${prefs.speakerCheck}`,
+    keyLine("elevenlabs", eleven),
+    keyLine("inworld", inworld),
   ].join("\n");
+}
+
+/** Execute one parsed `/voice` invocation. Preference changes persist. */
+
+type EnrollmentSession = { abort: AbortController };
+
+let activeEnrollment: EnrollmentSession | null = null;
+
+/** Cancel a running guided enrollment, if any. Wired into `/voice off`. */
+export function cancelVoiceEnrollment(): void {
+  activeEnrollment?.abort.abort();
+  activeEnrollment = null;
+}
+
+function describeIsolation(env: CommandEnv): string {
+  const prefs = env.getPrefs();
+  const base = `isolation: ${prefs.isolation ? "on" : "off"}`;
+  const io = env.voiceIo;
+  if (!io) return base;
+  const built = io.helperBuilt() ? "helper built" : "helper not built (run /voice setup)";
+  const route = !prefs.isolation ? "ffmpeg/ffplay" : io.hadFallback() ? "ffmpeg/ffplay (helper fallback)" : io.isActive() ? "helper active" : "helper";
+  return `${base} (${built}, ${route})`;
+}
+
+async function describeSpeaker(env: CommandEnv): Promise<string> {
+  const prefs = env.getPrefs();
+  const sp = env.speaker;
+  if (!sp) return `speaker check: ${prefs.speakerCheck} (unavailable)`;
+  const profile = await sp.loadProfile().catch(() => undefined);
+  if (!profile) return `speaker check: ${prefs.speakerCheck} (not enrolled — run /voice enroll)`;
+  const threshold = speakerThresholdFor(profile.suggestedThreshold, prefs.speakerCheck);
+  const modelNote = sp.modelCachedPath() ? "" : "; model missing, check is off";
+  return `speaker check: ${prefs.speakerCheck} (enrolled ${profile.enrolledAt}, threshold ${threshold.toFixed(2)}${modelNote})`;
+}
+
+async function runSpeakerTest(ctx: CommandCtx, env: CommandEnv): Promise<void> {
+  const sp = env.speaker;
+  if (!sp) {
+    ctx.notify("Speaker check is unavailable in this session.", "warning");
+    return;
+  }
+  const prefs = env.getPrefs();
+  const profile = await sp.loadProfile().catch(() => undefined);
+  if (!profile || prefs.speakerCheck === "off") {
+    ctx.notify("Speaker check is off (no profile enrolled).", "info");
+    return;
+  }
+  const modelPath = sp.modelCachedPath();
+  if (!modelPath) {
+    ctx.notify("Speaker check is off: model missing (run /voice setup).", "warning");
+    return;
+  }
+  ctx.notify("Speaker test: read one short phrase…", "info");
+  const capture = await sp.capturePhrase("speaker test phrase", { signal: new AbortController().signal });
+  if (capture.status !== "ok") {
+    ctx.notify("Speaker test: no usable speech captured.", "warning");
+    return;
+  }
+  const embedder = sp.createEmbedder(modelPath);
+  const score = cosineSimilarity(embedder.embed(capture.pcm), profile.centroid);
+  const threshold = speakerThresholdFor(profile.suggestedThreshold, prefs.speakerCheck);
+  const decision = score >= threshold ? "accept" : "reject";
+  ctx.notify(
+    `speaker test: score ${score.toFixed(2)} vs threshold ${threshold.toFixed(2)} (${prefs.speakerCheck}) — ${decision} (nothing submitted)`,
+    "info",
+  );
+}
+
+async function runEnrollment(ctx: CommandCtx, env: CommandEnv): Promise<void> {
+  const sp = env.speaker;
+  if (!sp) {
+    ctx.notify("Enrollment is unavailable in this session.", "warning");
+    return;
+  }
+  if (activeEnrollment) {
+    ctx.notify("Enrollment already in progress.", "warning");
+    return;
+  }
+  const session: EnrollmentSession = { abort: new AbortController() };
+  activeEnrollment = session;
+  const wasListening =
+    (env.controller as { getPhase?: () => string }).getPhase?.() !== "off";
+  await env.controller.stop();
+  try {
+    let modelPath: string;
+    try {
+      modelPath = await sp.ensureModel(session.abort.signal);
+    } catch (err) {
+      if (session.abort.signal.aborted) ctx.notify("Enrollment cancelled.", "warning");
+      else ctx.notify(`Enrollment failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    }
+    const embedder = sp.createEmbedder(modelPath);
+    const count = Math.min(RECOMMENDED_ENROLL_CLIPS, ENROLL_PHRASES.length);
+    const phrases = ENROLL_PHRASES.slice(0, count);
+    const embeddings: Float32Array[] = [];
+    let index = 0;
+    const repeats = new Map<number, number>();
+    while (index < phrases.length) {
+      if (session.abort.signal.aborted) {
+        ctx.notify("Enrollment cancelled.", "warning");
+        return;
+      }
+      const phrase = phrases[index] as string;
+      ctx.notify(`Enroll ${index + 1}/${phrases.length}: read aloud — "${phrase}"`, "info");
+      let capture: Awaited<ReturnType<NonNullable<CommandEnv["speaker"]>["capturePhrase"]>>;
+      try {
+        capture = await sp.capturePhrase(phrase, { signal: session.abort.signal });
+      } catch {
+        if (session.abort.signal.aborted) ctx.notify("Enrollment cancelled.", "warning");
+        else ctx.notify("Enrollment capture failed.", "error");
+        return;
+      }
+      if (capture.status === "cancelled" || session.abort.signal.aborted) {
+        ctx.notify("Enrollment cancelled.", "warning");
+        return;
+      }
+      if (capture.status === "too-short") {
+        const seen = (repeats.get(index) ?? 0) + 1;
+        repeats.set(index, seen);
+        if (seen > ENROLL_MAX_REPEATS) {
+          ctx.notify("Enrollment aborted: phrase too short three times.", "warning");
+          return;
+        }
+        ctx.notify(`Too short — please repeat: "${phrase}"`, "warning");
+        continue;
+      }
+      // Enrollment audio stays in memory; it is embedded and never written to disk.
+      embeddings.push(embedder.embed(capture.pcm));
+      index += 1;
+    }
+    if (embeddings.length < MIN_ENROLL_CLIPS) {
+      ctx.notify(`Enrollment needs at least ${MIN_ENROLL_CLIPS} clips; got ${embeddings.length}.`, "warning");
+      return;
+    }
+    const profile = sp.buildProfile(embeddings, modelPath);
+    await sp.saveProfile(profile);
+    const scores = profile.enrollScores.map((s) => s.toFixed(2)).join(", ");
+    const effective = speakerThresholdFor(profile.suggestedThreshold, env.getPrefs().speakerCheck);
+    ctx.notify(
+      `Enrolled ${embeddings.length} clips. Scores: ${scores}. Threshold: suggested ${profile.suggestedThreshold.toFixed(2)} (effective ${effective.toFixed(2)} at ${env.getPrefs().speakerCheck}).`,
+      "info",
+    );
+  } finally {
+    activeEnrollment = null;
+    if (wasListening && !session.abort.signal.aborted) await env.controller.start();
+  }
 }
 
 /** Execute one parsed `/voice` invocation. Preference changes persist. */
@@ -254,12 +502,32 @@ export async function handleVoiceCommand(
     }
     return key;
   };
+  const needTtsKey = (): string | null => {
+    if (ttsProviderOf(prefs) === "inworld") {
+      const key = env.getInworldKey();
+      if (!key) {
+        ctx.notify(MISSING_INWORLD_KEY_MESSAGE, "warning");
+        return null;
+      }
+      return key;
+    }
+    return needKey();
+  };
 
   switch (parsed.sub) {
     case "status": {
       const { warning } = await env.loadPrefs().catch(() => ({ prefs: env.getPrefs(), warning: undefined as string | undefined }));
       if (warning) ctx.notify(warning, "warning");
-      ctx.notify(prefsSummary(env.getPrefs(), env.keyPresent(), env.keyLast4()), "info");
+      ctx.notify(
+        prefsSummary(
+          env.getPrefs(),
+          { present: env.keyPresent(), last4: env.keyLast4() },
+          { present: env.inworldKeyPresent(), last4: env.inworldKeyLast4() },
+        ),
+        "info",
+      );
+      ctx.notify(describeIsolation(env), "info");
+      ctx.notify(await describeSpeaker(env), "info");
       return;
     }
     case "on": {
@@ -274,6 +542,7 @@ export async function handleVoiceCommand(
       return;
     }
     case "off": {
+      cancelVoiceEnrollment();
       await env.controller.stop();
       env.controller.cancelSpeech();
       return;
@@ -295,6 +564,22 @@ export async function handleVoiceCommand(
       } catch (err) {
         lines.push(`vad model: failed — ${err instanceof Error ? err.message : String(err)}`);
       }
+      if (env.voiceIo) {
+        try {
+          const helperPath = await env.voiceIo.ensureHelper(new AbortController().signal);
+          lines.push(`voice isolation helper: built (${helperPath})`);
+        } catch (err) {
+          lines.push(`voice isolation helper: failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      if (env.speaker) {
+        try {
+          await env.speaker.ensureModel(new AbortController().signal);
+          lines.push("speaker model: provisioned");
+        } catch (err) {
+          lines.push(`speaker model: failed — ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       lines.push("mic permission: grant the terminal app Microphone access in System Settings > Privacy & Security > Microphone, then restart.");
       lines.push("setup does not enable the mic; run /voice on when ready.");
       ctx.notify(lines.join("\n"), "info");
@@ -304,18 +589,22 @@ export async function handleVoiceCommand(
       ctx.notify(
         [
           "/voice status|on|off|setup|send|help",
-          "/voice tts on|off — session speech, requires key + voice",
-          "/voice list — list ElevenLabs voices (needs key)",
-          "/voice <voice-id> — select ElevenLabs voice (saved, no key needed)",
-          "/voice id <id> — select ElevenLabs voice by id",
-          "/voice model [id] — list or select TTS model",
+          "/voice provider [inworld|elevenlabs] — show or select the TTS provider (default inworld; STT stays ElevenLabs)",
+          "/voice tts on|off — session speech, requires the active provider key (+ ElevenLabs voice)",
+          "/voice list — list active-provider voices (needs that provider's key)",
+          "/voice <voice-id> — select the active-provider voice (saved, no key needed; Inworld ids are names like Ashley)",
+          "/voice id <id> — select the active-provider voice by id (explicit form)",
+          "/voice model [id] — list or select the active-provider TTS model",
           "/voice wake hey-pi|hi-pi|both",
           "/voice sensitivity low|normal|high",
           "/voice mic list|default|<name> — names with spaces may be quoted",
           "/voice autostart on|off",
           '/voice send auto|review — review: dictation goes to the editor; Enter or "send to pi" submits; "hey pi, send" also works',
-          "/voice test mic|wake|tts|stt — tts is billable",
-          "Privacy: post-wake audio and assistant prose go to ElevenLabs; wake detection is local.",
+          "/voice isolation on|off — echo-cancelling helper capture + playback (bare shows helper state)",
+          "/voice enroll — guided owner-voice enrollment (cancellable with /voice off)",
+          "/voice speaker off|low|normal|high|forget — strictness, or delete the voice profile",
+          "/voice test mic|wake|tts|stt|speaker — tts is billable; speaker submits nothing",
+          "Privacy: post-wake audio goes to ElevenLabs (Scribe); assistant prose goes to Inworld (TTS). Wake detection is local.",
         ].join("\n"),
         "info",
       );
@@ -328,9 +617,9 @@ export async function handleVoiceCommand(
         return;
       }
       if (value === "on") {
-        const key = needKey();
+        const key = needTtsKey();
         if (!key) return;
-        if (!env.getPrefs().voiceId) {
+        if (ttsProviderOf(env.getPrefs()) === "elevenlabs" && !env.getPrefs().voiceId) {
           ctx.notify("Select a voice first: /voice <voice-id>.", "warning");
           return;
         }
@@ -371,14 +660,31 @@ export async function handleVoiceCommand(
       ctx.notify(`send mode: ${next.sendMode}`, "info");
       return;
     }
+    case "provider": {
+      const value = parsed.value?.toLowerCase();
+      if (!value) {
+        ctx.notify(`provider: ${ttsProviderOf(env.getPrefs())}`, "info");
+        return;
+      }
+      if (value !== "inworld" && value !== "elevenlabs") {
+        ctx.notify("Usage: /voice provider [inworld|elevenlabs]", "warning");
+        return;
+      }
+      const next = await env.mutatePrefs((p) => {
+        p.ttsProvider = value;
+      });
+      ctx.notify(`provider: ${next.ttsProvider}`, "info");
+      return;
+    }
     case "list":
     case "id": {
+      const inworld = ttsProviderOf(env.getPrefs()) === "inworld";
       if (!parsed.value || parsed.sub === "list") {
-        const key = needKey();
+        const key = inworld ? needTtsKey() : needKey();
         if (!key) return;
         let voices: VoiceEntry[];
         try {
-          voices = await env.listVoices(key);
+          voices = inworld ? await env.listInworldVoices(key) : await env.listVoices(key);
         } catch (err) {
           ctx.notify(`Voice list failed: ${err instanceof Error ? err.message : String(err)}`, "error");
           return;
@@ -388,6 +694,13 @@ export async function handleVoiceCommand(
         return;
       }
       const id = unquote(parsed.value);
+      if (inworld) {
+        const next = await env.mutatePrefs((p) => {
+          p.inworldVoiceId = id;
+        });
+        ctx.notify(`voice: ${next.inworldVoiceId}`, "info");
+        return;
+      }
       const next = await env.mutatePrefs((p) => {
         p.voiceId = id;
       });
@@ -395,7 +708,12 @@ export async function handleVoiceCommand(
       return;
     }
     case "model": {
+      const inworld = ttsProviderOf(env.getPrefs()) === "inworld";
       if (!parsed.value) {
+        if (inworld) {
+          ctx.notify(`Select with /voice model <id>. Known: ${INWORLD_TTS_MODELS.join(", ")}`, "info");
+          return;
+        }
         let models: string[];
         try {
           const key = env.getKey();
@@ -407,6 +725,13 @@ export async function handleVoiceCommand(
         return;
       }
       const id = unquote(parsed.value);
+      if (inworld) {
+        const next = await env.mutatePrefs((p) => {
+          p.inworldModel = id;
+        });
+        ctx.notify(`tts model: ${next.inworldModel}`, "info");
+        return;
+      }
       const next = await env.mutatePrefs((p) => {
         p.ttsModel = id;
       });
@@ -488,16 +813,63 @@ export async function handleVoiceCommand(
       ctx.notify(`mic: ${name}`, "info");
       return;
     }
+    case "isolation": {
+      const value = parsed.value?.toLowerCase();
+      if (value === undefined) {
+        ctx.notify(describeIsolation(env), "info");
+        return;
+      }
+      if (value !== "on" && value !== "off") {
+        ctx.notify("Usage: /voice isolation on|off", "warning");
+        return;
+      }
+      await env.mutatePrefs((prefs) => {
+        prefs.isolation = value === "on";
+      });
+      await env.controller.restartIfListening();
+      ctx.notify(describeIsolation(env), "info");
+      return;
+    }
+    case "enroll": {
+      await runEnrollment(ctx, env);
+      return;
+    }
+    case "speaker": {
+      const value = parsed.value?.toLowerCase();
+      if (value === undefined) {
+        ctx.notify(await describeSpeaker(env), "info");
+        return;
+      }
+      if (value === "forget") {
+        await env.speaker?.deleteProfile().catch(() => undefined);
+        ctx.notify("Speaker profile deleted.", "info");
+        return;
+      }
+      if (value !== "off" && value !== "low" && value !== "normal" && value !== "high") {
+        ctx.notify("Usage: /voice speaker off|low|normal|high|forget", "warning");
+        return;
+      }
+      await env.mutatePrefs((prefs) => {
+        prefs.speakerCheck = value;
+      });
+      await env.controller.restartIfListening();
+      ctx.notify(await describeSpeaker(env), "info");
+      return;
+    }
     case "test": {
       const value = parsed.value?.toLowerCase();
-      if (value !== "mic" && value !== "wake" && value !== "tts" && value !== "stt") {
-        ctx.notify("Usage: /voice test mic|wake|tts|stt", "warning");
+      if (value !== "mic" && value !== "wake" && value !== "tts" && value !== "stt" && value !== "speaker") {
+        ctx.notify("Usage: /voice test mic|wake|tts|stt|speaker", "warning");
+        return;
+      }
+      if (value === "speaker") {
+        await runSpeakerTest(ctx, env);
         return;
       }
       if (value === "tts") {
-        const key = needKey();
+        const key = needTtsKey();
         if (!key) return;
-        if (!env.getPrefs().voiceId) {
+        if (ttsProviderOf(env.getPrefs()) === "elevenlabs" && !env.getPrefs().voiceId) {
           ctx.notify("Select a voice first: /voice <voice-id>.", "warning");
           return;
         }

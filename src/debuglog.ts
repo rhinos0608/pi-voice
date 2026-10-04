@@ -26,14 +26,19 @@ export type DebugLogOptions = {
 
 const SENSITIVE_KEY = /key|token|secret|auth|password/i;
 const SK_PATTERN = /\bsk_[A-Za-z0-9]{16,}/g;
+const BASIC_PATTERN = /\bBasic\s+[A-Za-z0-9+/=_-]{8,}/g;
 const REDACTED = "[redacted]";
 
 function redactString(value: string): string {
-  const apiKey = process.env["ELEVENLABS_API_KEY"];
   let out = value;
-  if (apiKey !== undefined && apiKey.length >= 8) {
-    out = out.split(apiKey).join(REDACTED);
+  for (const name of ["ELEVENLABS_API_KEY", "INWORLD_API_KEY"] as const) {
+    const apiKey = process.env[name];
+    if (apiKey !== undefined && apiKey.length >= 8) {
+      out = out.split(apiKey).join(REDACTED);
+    }
   }
+  BASIC_PATTERN.lastIndex = 0;
+  out = out.replace(BASIC_PATTERN, "Basic " + REDACTED);
   SK_PATTERN.lastIndex = 0;
   out = out.replace(SK_PATTERN, REDACTED);
   return out;

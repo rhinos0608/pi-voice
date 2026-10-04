@@ -11,16 +11,19 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { DEFAULT_PREFERENCES, type ModelPaths, type VoiceFailure, type VoicePreferences } from "./contracts.ts";
+import { DEFAULT_PREFERENCES, type AudioSource, type ModelPaths, type VoiceFailure, type VoicePreferences } from "./contracts.ts";
 import { VoiceController, type VoiceHost } from "./controller.ts";
 import { createDebugLog } from "./debuglog.ts";
 import { analyzePcm, classifyCapture } from "./level.ts";
-import { createAvFoundationSource, FFMPEG_PATH, listMicrophones } from "./mic.ts";
-import { ensureVadModel, ensureWakeModel, isVadModelProvisioned, isWakeModelProvisioned } from "./model.ts";
+import { createAvFoundationSource, FFMPEG_PATH, listMicrophones, withSessionFallback } from "./mic.ts";
+import { ensureVadModel, ensureWakeModel, isVadModelProvisioned, isWakeModelProvisioned, ensureSpeakerModel, speakerModelCachedPath } from "./model.ts";
+import { buildProfile, createSpeakerEmbedder, createSpeakerGate, deleteSpeakerProfile, loadSpeakerProfile, saveSpeakerProfile, type SpeakerProfile } from "./speaker.ts";
+import { createVoiceIo, ensureVoiceIoHelper, VoiceIoError, voiceIoHelperPath, type VoiceIoHandle } from "./voice-io.ts";
 import { createFfplaySink, FFPLAY_PATH } from "./player.ts";
-import { keyStatus, loadPreferences, savePreferences } from "./preferences.ts";
+import { keyStatus, inworldKeyStatus, loadPreferences, resolveTtsKey, resolveTtsModelId, resolveTtsVoiceId, savePreferences, ttsProviderOf } from "./preferences.ts";
 import { startUtterance } from "./stt.ts";
-import { DEFAULT_TTS_MODEL, startSpeech } from "./tts.ts";
+import { startSpeech, type StartSpeechOptions } from "./tts.ts";
+import { startInworldSpeech } from "./inworld-tts.ts";
 import { createEndpointer, type EndpointerEvents } from "./vad.ts";
 import { createWakeDetector, type WakeGroup } from "./wake.ts";
 import {
@@ -29,6 +32,7 @@ import {
   type CommandEnv,
 } from "./commands.ts";
 import { listTtsModels, listVoices } from "./elevenlabs-api.ts";
+import { listInworldVoices } from "./inworld-api.ts";
 
 const STATUS_KEY = "voice";
 const SETUP_HINT = "voice: run /voice setup";
@@ -191,20 +195,28 @@ async function runLiveTest(kind: "mic" | "wake" | "tts" | "stt", prefs: VoicePre
       await utterance.close().catch(() => undefined);
     }
   }
-  const key = process.env["ELEVENLABS_API_KEY"];
-  if (!key || !prefs.voiceId) throw new Error("TTS test needs a key and a selected voice.");
-  const sink = createFfplaySink();
-  await new Promise<void>((resolve, reject) => {
-    const speech = startSpeech(
-      {
-        key,
-        voiceId: prefs.voiceId as string,
-        modelId: prefs.ttsModel ?? DEFAULT_TTS_MODEL,
-        onDone: () => resolve(),
-        onFailure: (f) => reject(new Error(f.message)),
-      },
-      { sinkFactory: () => sink },
+  const key = resolveTtsKey(prefs);
+  const voiceId = resolveTtsVoiceId(prefs);
+  if (!key || !voiceId) {
+    throw new Error(
+      ttsProviderOf(prefs) === "inworld"
+        ? "TTS test needs INWORLD_API_KEY."
+        : "TTS test needs a key and a selected voice.",
     );
+  }
+  const sink = createFfplaySink();
+  const inworld = ttsProviderOf(prefs) === "inworld";
+  await new Promise<void>((resolve, reject) => {
+    const opts: StartSpeechOptions = {
+      key,
+      voiceId,
+      modelId: resolveTtsModelId(prefs),
+      onDone: () => resolve(),
+      onFailure: (f) => reject(new Error(f.message)),
+    };
+    const speech = inworld
+      ? startInworldSpeech(opts, { sinkFactory: () => sink })
+      : startSpeech(opts, { sinkFactory: () => sink });
     speech.push(TTS_TEST_PHRASE);
     speech.finish();
   });
@@ -215,6 +227,161 @@ export default function voiceExtension(pi: ExtensionAPI): void {
   let prefs: VoicePreferences = { ...DEFAULT_PREFERENCES };
   let liveCtx: ExtensionContext | ExtensionCommandContext | null = null;
   const debug = createDebugLog();
+
+  let voiceIoHandle: VoiceIoHandle | null = null;
+  let voiceIoRouteKey: string | null = null;
+  let voiceIoFallback = false;
+  let voiceIoWarned = false;
+  let voiceIoInUse = false;
+  let speakerProfile: SpeakerProfile | undefined;
+  let speakerEmbedder: { embed(pcm: Buffer): Float32Array } | undefined;
+  let speakerEmbedderKey: string | undefined;
+
+  function voiceIoRouteKeyFor(helperPath: string): string {
+    return `${helperPath}|${prefs.mic.kind === "named" ? prefs.mic.name : "default"}`;
+  }
+
+  /** Shared helper handle. Probes only — never compiles (setup owns the build). */
+  function ensureVoiceIo(): VoiceIoHandle | null {
+    if (!prefs.isolation || voiceIoFallback) return null;
+    const helperPath = voiceIoHelperPath();
+    if (!helperPath) return null;
+    const key = voiceIoRouteKeyFor(helperPath);
+    if (!voiceIoHandle || voiceIoRouteKey !== key) {
+      const stale = voiceIoHandle;
+      voiceIoHandle = null;
+      if (stale) void stale.close().catch(() => undefined);
+      voiceIoHandle = createVoiceIo({
+        helperPath,
+        ...(prefs.mic.kind === "named" ? { input: prefs.mic.name } : {}),
+        voiceProcessing: true,
+        ...(debug.enabled
+          ? {
+              log: (event: string, data?: unknown): void => {
+                debug.log(event, (data ?? {}) as Record<string, unknown>);
+              },
+            }
+          : {}),
+      });
+      voiceIoRouteKey = key;
+    }
+    return voiceIoHandle;
+  }
+
+  async function refreshSpeakerState(): Promise<void> {
+    try {
+      speakerProfile = await loadSpeakerProfile();
+    } catch {
+      speakerProfile = undefined;
+    }
+    if (!speakerProfile || !speakerModelCachedPath()) {
+      speakerEmbedder = undefined;
+      speakerEmbedderKey = undefined;
+    }
+  }
+
+  /** Lazily create the session embedder from the cached model path; undefined when the model is missing. */
+  function ensureSpeakerEmbedder(): ((pcm: Buffer) => Float32Array) | undefined {
+    if (!speakerProfile) return undefined;
+    const cached = speakerModelCachedPath();
+    if (!cached) return undefined;
+    if (!speakerEmbedder || speakerEmbedderKey !== cached) {
+      try {
+        speakerEmbedder = createSpeakerEmbedder(cached);
+        speakerEmbedderKey = cached;
+      } catch {
+        speakerEmbedder = undefined;
+        speakerEmbedderKey = undefined;
+        return undefined;
+      }
+    }
+    const embedder = speakerEmbedder;
+    return (pcm: Buffer) => embedder.embed(pcm);
+  }
+
+  /** Record one enrollment phrase in memory (never written to disk) until VAD end-of-speech, max ~6 s. */
+  async function captureEnrollmentPhrase(
+    _prompt: string,
+    opts: { signal: AbortSignal },
+  ): Promise<
+    | { status: "ok"; pcm: Buffer; speechMs: number }
+    | { status: "too-short"; speechMs: number }
+    | { status: "cancelled" }
+  > {
+    const vadPath = await ensureVadModel(opts.signal);
+    const io = ensureVoiceIo();
+    const source = io ? io.source : createAvFoundationSource(prefs.mic);
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let speechBytes = 0;
+      let heard = false;
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const endpointer = createEndpointer(vadPath, {
+        onSpeechStart: () => {
+          heard = true;
+        },
+        onSpeechEnd: () => {
+          finishOk();
+        },
+      });
+      const cleanup = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        opts.signal.removeEventListener("abort", onAbort);
+        endpointer.close();
+      };
+      const finishOk = (): void => {
+        if (done) return;
+        done = true;
+        cleanup();
+        void source.stop().catch(() => undefined);
+        const speechMs = speechBytes / 32;
+        if (!heard || speechMs < 1500) resolve({ status: "too-short", speechMs });
+        else resolve({ status: "ok", pcm: Buffer.concat(chunks), speechMs });
+      };
+      const onAbort = (): void => {
+        if (done) return;
+        done = true;
+        cleanup();
+        void source.stop().catch(() => undefined);
+        resolve({ status: "cancelled" });
+      };
+      const onError = (err: Error): void => {
+        if (done) return;
+        done = true;
+        cleanup();
+        void source.stop().catch(() => undefined);
+        reject(err);
+      };
+      if (opts.signal.aborted) {
+        cleanup();
+        resolve({ status: "cancelled" });
+        return;
+      }
+      opts.signal.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => {
+        finishOk();
+      }, 6000);
+      void source
+        .start(
+          (chunk) => {
+            if (done) return;
+            try {
+              endpointer.push(chunk);
+            } catch {
+              finishOk();
+              return;
+            }
+            if (heard) {
+              chunks.push(chunk);
+              speechBytes += chunk.length;
+            }
+          },
+          onError,
+        )
+        .catch(onError);
+    });
+  }
 
   function editorUi(): ExtensionContext["ui"] | null {
     return liveCtx?.hasUI ? liveCtx.ui : null;
@@ -244,9 +411,29 @@ export default function voiceExtension(pi: ExtensionAPI): void {
   const controller = new VoiceController(host, {
     getPrefs: () => prefs,
     getKey: () => process.env["ELEVENLABS_API_KEY"],
+    getTtsKey: () => resolveTtsKey(prefs),
     isModelProvisioned: () => isWakeModelProvisioned(),
     ensureModel: (signal) => ensureWakeModel(signal),
-    createSource: (mic, onNotice) => createAvFoundationSource(mic, { onNotice }),
+    createSource: (mic, onNotice) => {
+      const io = ensureVoiceIo();
+      if (!io) return createAvFoundationSource(mic, { onNotice });
+      return withSessionFallback({
+        primary: io.source,
+        createFallback: () => createAvFoundationSource(mic, { onNotice }),
+        shouldFallback: (err) =>
+          err instanceof VoiceIoError && (err.code === "device" || err.code === "engine" || err.code === "exited"),
+        onFallback: () => {
+          voiceIoFallback = true;
+          if (!voiceIoWarned) {
+            voiceIoWarned = true;
+            onNotice?.("Voice isolation helper failed to start; using ffmpeg for this session.");
+          }
+        },
+        onPrimaryStart: () => {
+          voiceIoInUse = true;
+        },
+      });
+    },
     createDetector: (
       paths: ModelPaths,
       choice: VoicePreferences["wake"],
@@ -255,13 +442,19 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       options: { includeSend: boolean },
     ) => createWakeDetector(paths, choice, sensitivity, onWake, undefined, options),
     openUtterance: (key, handlers) => startUtterance(key, handlers),
-    openSpeech: (opts) =>
-      startSpeech(opts, {
-        sinkFactory: () => createFfplaySink(),
+    openSpeech: (opts) => {
+      const speechDeps = {
+        sinkFactory: () => ensureVoiceIo()?.createSink() ?? createFfplaySink(),
         ...(debug.enabled ? { log: (event: string, data?: Record<string, unknown>) => debug.log(event, data) } : {}),
-      }),
+      };
+      return ttsProviderOf(prefs) === "inworld" ? startInworldSpeech(opts, speechDeps) : startSpeech(opts, speechDeps);
+    },
     ensureVadModel: (signal: AbortSignal) => ensureVadModel(signal),
     createEndpointer: (modelPath: string, events: EndpointerEvents) => createEndpointer(modelPath, events),
+    getSpeakerCheck: () => (speakerProfile && speakerModelCachedPath() ? prefs.speakerCheck : "off"),
+    getSpeakerProfile: () => speakerProfile,
+    getSpeakerEmbed: () => ensureSpeakerEmbedder(),
+    createSpeakerGate: (opts) => createSpeakerGate(opts as unknown as Parameters<typeof createSpeakerGate>[0]),
     ...(debug.enabled ? { log: (event: string, data?: Record<string, unknown>) => debug.log(event, data) } : {}),
   });
 
@@ -288,7 +481,28 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       listVoices: (key) => listVoices(key),
       listModels: (key) => listTtsModels(key),
       getKey: () => process.env["ELEVENLABS_API_KEY"],
+      getTtsProvider: () => ttsProviderOf(prefs),
+      getInworldKey: () => process.env["INWORLD_API_KEY"],
+      inworldKeyPresent: () => inworldKeyStatus().present,
+      inworldKeyLast4: () => inworldKeyStatus().last4,
+      listInworldVoices: (key) => listInworldVoices(key),
       runTest: (kind) => runLiveTest(kind, prefs),
+      voiceIo: {
+        helperBuilt: () => voiceIoHelperPath() !== undefined,
+        isActive: () => voiceIoInUse,
+        hadFallback: () => voiceIoFallback,
+        ensureHelper: (signal) => ensureVoiceIoHelper({ signal }),
+      },
+      speaker: {
+        loadProfile: () => loadSpeakerProfile(),
+        saveProfile: (profile) => saveSpeakerProfile(profile),
+        deleteProfile: () => deleteSpeakerProfile(),
+        ensureModel: (signal) => ensureSpeakerModel(signal),
+        modelCachedPath: () => speakerModelCachedPath(),
+        createEmbedder: (modelPath) => createSpeakerEmbedder(modelPath),
+        buildProfile: (embeddings, model) => buildProfile(embeddings, model),
+        capturePhrase: (prompt, opts) => captureEnrollmentPhrase(prompt, opts),
+      },
     };
   }
 
@@ -300,6 +514,9 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         listVoices: (key: string) => listVoices(key),
         listModels: (key: string) => listTtsModels(key),
         getKey: () => process.env["ELEVENLABS_API_KEY"],
+        getTtsProvider: () => ttsProviderOf(prefs),
+        getInworldKey: () => process.env["INWORLD_API_KEY"],
+        listInworldVoices: (key: string) => listInworldVoices(key),
       };
       return getVoiceCompletions(argumentPrefix, probe);
     },
@@ -316,7 +533,9 @@ export default function voiceExtension(pi: ExtensionAPI): void {
           cmdCtx.ui.setStatus(key, text);
         },
       };
+      await refreshSpeakerState();
       await handleVoiceCommand(args, ctxView, buildEnv(cmdCtx));
+      await refreshSpeakerState();
     },
   });
 
@@ -326,6 +545,11 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     const loaded = await loadPreferences();
     prefs = loaded.prefs;
     if (loaded.warning) ctx.ui.notify(loaded.warning, "warning");
+    // Fresh session: forget any fallback, but never compile here (setup owns builds).
+    voiceIoFallback = false;
+    voiceIoWarned = false;
+    voiceIoInUse = false;
+    await refreshSpeakerState();
     const key = process.env["ELEVENLABS_API_KEY"];
     const provisioned = (await isWakeModelProvisioned()) && (await isVadModelProvisioned());
     if (prefs.autostart && provisioned && key) {
@@ -338,6 +562,10 @@ export default function voiceExtension(pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     liveCtx = ctx;
     await controller.shutdown();
+    const io = voiceIoHandle;
+    voiceIoHandle = null;
+    voiceIoRouteKey = null;
+    await io?.close().catch(() => undefined);
   });
 
   pi.on("message_update", (event, ctx) => {

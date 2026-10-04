@@ -49,7 +49,7 @@ type FakeSpeech = {
   cancelled: number;
 };
 
-function makeHarness(overrides?: { prefs?: Partial<VoicePreferences>; idle?: boolean; key?: string }) {
+function makeHarness(overrides?: { prefs?: Partial<VoicePreferences>; idle?: boolean; key?: string; ttsKey?: string }) {
   const prefs: VoicePreferences = { ...DEFAULT_PREFERENCES, ...overrides?.prefs };
   const host: VoiceHost & { sent: { text: string; opts?: { deliverAs?: "steer" | "followUp" } }[]; statuses: (string | undefined)[]; notifies: string[]; notifyTypes: (string | undefined)[]; editor: string } = {
     sent: [],
@@ -81,17 +81,22 @@ function makeHarness(overrides?: { prefs?: Partial<VoicePreferences>; idle?: boo
   const utterances: FakeUtterance[] = [];
   const endpointers: FakeEndpointer[] = [];
   const logs: { event: string; data?: Record<string, unknown> }[] = [];
-  const speeches: { opts: { onDone: () => void; onFailure: (f: VoiceFailure) => void }; fake: FakeSpeech }[] = [];
+  const speeches: {
+    opts: { key: string; voiceId: string; modelId?: string; onDone: () => void; onFailure: (f: VoiceFailure) => void };
+    fake: FakeSpeech;
+  }[] = [];
   const timers: { cb: () => void; ms: number }[] = [];
   let nowMs = 1_000_000;
   let errorCues = 0;
   let vadCalls = 0;
   let key: string | undefined = overrides && "key" in overrides ? overrides.key : "test-key";
+  let ttsKey: string | undefined = overrides && "ttsKey" in overrides ? overrides.ttsKey : key;
   let provisioned = true;
 
   const deps: ControllerDeps = {
     getPrefs: () => prefs,
     getKey: () => key,
+    getTtsKey: () => ttsKey,
     isModelProvisioned: async () => provisioned,
     ensureModel: async () => ({ encoder: "e", decoder: "d", joiner: "j", tokens: "t", keywordsFile: "k" }),
     createSource: () => {
@@ -162,7 +167,7 @@ function makeHarness(overrides?: { prefs?: Partial<VoicePreferences>; idle?: boo
         },
       };
     },
-    openSpeech: (opts: { onDone: () => void; onFailure: (f: VoiceFailure) => void }) => {
+    openSpeech: (opts: { key: string; voiceId: string; modelId?: string; onDone: () => void; onFailure: (f: VoiceFailure) => void }) => {
       const fake: FakeSpeech = { pushes: [], finished: 0, cancelled: 0 };
       speeches.push({ opts, fake });
       return {
@@ -249,6 +254,9 @@ function makeHarness(overrides?: { prefs?: Partial<VoicePreferences>; idle?: boo
     },
     setKey: (next: string | undefined): void => {
       key = next as string;
+    },
+    setTtsKey: (next: string | undefined): void => {
+      ttsKey = next;
     },
     setProvisioned: (next: boolean): void => {
       provisioned = next;
@@ -582,6 +590,62 @@ describe("tts streaming", () => {
     h.fireTimers();
     assert.ok(h.detectors[0].resets > resets);
     assert.equal(h.controller.getPhase(), "wake");
+  });
+});
+
+describe("provider TTS dispatch", () => {
+  function speak(h: ReturnType<typeof makeHarness>): void {
+    h.controller.onMessageUpdate({ role: "assistant" }, "text_delta", "Spoken prose here. ".repeat(8));
+    h.controller.onMessageEnd({ role: "assistant", stopReason: "stop" }, true);
+  }
+
+  it("inworld speaks with the default voice and no explicit selection", async () => {
+    const h = makeHarness({ prefs: { tts: true }, ttsKey: "iw-key" });
+    await h.controller.start();
+    speak(h);
+    assert.equal(h.speeches.length, 1);
+    assert.equal(h.speeches[0].opts.key, "iw-key");
+    assert.equal(h.speeches[0].opts.voiceId, "Ashley");
+    assert.equal(h.speeches[0].opts.modelId, "inworld-tts-2");
+  });
+
+  it("inworld uses saved voice and model overrides", async () => {
+    const h = makeHarness({
+      prefs: { tts: true, inworldVoiceId: "Hades", inworldModel: "inworld-tts-2-flash" },
+      ttsKey: "iw-key",
+    });
+    await h.controller.start();
+    speak(h);
+    assert.equal(h.speeches[0].opts.voiceId, "Hades");
+    assert.equal(h.speeches[0].opts.modelId, "inworld-tts-2-flash");
+  });
+
+  it("elevenlabs speaks with its own key, voice, and model", async () => {
+    const h = makeHarness({
+      prefs: { tts: true, ttsProvider: "elevenlabs", voiceId: "v1", ttsModel: "eleven_flash_v2_5" },
+      key: "el-key",
+      ttsKey: "el-tts-key",
+    });
+    await h.controller.start();
+    speak(h);
+    assert.equal(h.speeches.length, 1);
+    assert.equal(h.speeches[0].opts.key, "el-tts-key");
+    assert.equal(h.speeches[0].opts.voiceId, "v1");
+    assert.equal(h.speeches[0].opts.modelId, "eleven_flash_v2_5");
+  });
+
+  it("elevenlabs without a voice stays silent", async () => {
+    const h = makeHarness({ prefs: { tts: true, ttsProvider: "elevenlabs" }, key: "el-key", ttsKey: "el-key" });
+    await h.controller.start();
+    speak(h);
+    assert.equal(h.speeches.length, 0);
+  });
+
+  it("inworld without its key stays silent even with the STT key present", async () => {
+    const h = makeHarness({ prefs: { tts: true }, key: "el-key", ttsKey: undefined });
+    await h.controller.start();
+    speak(h);
+    assert.equal(h.speeches.length, 0);
   });
 });
 
@@ -976,5 +1040,124 @@ describe("capture endpointing and delivery", () => {
     assert.ok(h.logs.some((l) => l.event === "wake"));
     assert.ok(h.logs.some((l) => l.event === "intent" && l.data?.["kind"] === "dictate"));
     assert.ok(h.logs.some((l) => l.event === "delivery" && typeof l.data?.["length"] === "number"));
+  });
+});
+
+describe("speaker gate", () => {
+  type GateHarness = ReturnType<typeof makeHarness>;
+
+  /** Controllable gate: evaluates (calls embed) once enough speech arrives, then caches the verdict. */
+  function armGate(h: GateHarness, opts: { accept: boolean; evaluateAfterPushes?: number; finalDecision?: "accept" | "reject" | "insufficient"; finalScore?: number }): {
+    pushes: number;
+    embedCalls: number;
+  } {
+    const state = { pushes: 0, embedCalls: 0 };
+    const evaluateAfter = opts.evaluateAfterPushes ?? 2;
+    let verdict: "accept" | "reject" | undefined;
+    h.deps.getSpeakerCheck = () => "normal";
+    h.deps.getSpeakerProfile = () => ({ centroid: [1, 0], suggestedThreshold: 0.75 });
+    h.deps.getSpeakerEmbed = () => () => {
+      state.embedCalls++;
+      return { length: 2, 0: 1, 1: 0 };
+    };
+    h.deps.createSpeakerGate = () => ({
+      push: (_pcm: Buffer): void => {
+        state.pushes++;
+        if (verdict === undefined && state.pushes >= evaluateAfter) {
+          h.deps.getSpeakerEmbed?.()?.(Buffer.from([0]));
+          verdict = opts.accept ? "accept" : "reject";
+        }
+      },
+      decision: (): "accept" | "reject" | "pending" => verdict ?? "pending",
+      finalize: (): { decision: "accept" | "reject" | "insufficient"; score?: number; speechMs: number } => {
+        if (verdict !== undefined) return { decision: verdict, score: 0.9, speechMs: 1500 };
+        return { decision: opts.finalDecision ?? "accept", score: opts.finalScore ?? 0.81, speechMs: 900 };
+      },
+      reset: (): void => {
+        verdict = undefined;
+      },
+    });
+    return state;
+  }
+
+  async function captureWithSpeech(h: GateHarness): Promise<void> {
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+  }
+
+  it("reject mid-utterance cancels STT and submits nothing", async () => {
+    const h = makeHarness({});
+    armGate(h, { accept: false });
+    await captureWithSpeech(h);
+    const errorCues = h.errorCues();
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    assert.equal(h.controller.getPhase(), "capture");
+    h.sources[0].emit(Buffer.from([5, 6, 7, 8]));
+    assert.equal(h.controller.getPhase(), "wake");
+    assert.equal(h.utterances[0].closed, 1);
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.errorCues(), errorCues + 1);
+    assert.equal(h.host.statuses.at(-1), "\uD83C\uDF99 not your voice");
+    h.fireMs(2000);
+    assert.equal(h.host.statuses.at(-1), "\uD83C\uDF99 listening");
+    // Late finals from the canceled utterance never submit.
+    h.utterances[0].handlers.onFinal("impostor words");
+    assert.equal(h.host.sent.length, 0);
+    const speakerLogs = h.logs.filter((l) => l.event === "speaker");
+    assert.equal(speakerLogs.length, 1);
+    assert.equal(speakerLogs[0].data?.["decision"], "reject");
+  });
+
+  it("finalize reject at end of speech cancels without submit", async () => {
+    const h = makeHarness({});
+    armGate(h, { accept: true, evaluateAfterPushes: 100, finalDecision: "reject", finalScore: 0.4 });
+    await captureWithSpeech(h);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    assert.equal(h.controller.getPhase(), "capture");
+    h.endpointers[0].end(1.3);
+    assert.equal(h.controller.getPhase(), "wake");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.utterances[0].commits, 0);
+    assert.ok(h.logs.some((l) => l.event === "speaker" && l.data?.["decision"] === "reject" && l.data?.["score"] === 0.4));
+  });
+
+  it("finalize accept and insufficient proceed to submit", async () => {
+    for (const finalDecision of ["accept", "insufficient"] as const) {
+      const h = makeHarness({});
+      armGate(h, { accept: true, evaluateAfterPushes: 100, finalDecision });
+      await captureWithSpeech(h);
+      h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+      h.endpointers[0].end(1.3);
+      assert.equal(h.utterances[0].commits, 1);
+      h.utterances[0].handlers.onFinal("owner words here");
+      assert.deepEqual(h.host.sent[0], { text: "owner words here", opts: undefined });
+      assert.ok(h.logs.some((l) => l.event === "speaker" && l.data?.["decision"] === finalDecision));
+    }
+  });
+
+  it("embedding runs at evaluation, not on every frame", async () => {
+    const h = makeHarness({});
+    const state = armGate(h, { accept: true, evaluateAfterPushes: 3 });
+    await captureWithSpeech(h);
+    for (let i = 0; i < 5; i++) h.sources[0].emit(Buffer.from([9, 9, 9, 9]));
+    assert.equal(state.pushes, 5);
+    assert.equal(state.embedCalls, 1);
+  });
+
+  it("check is off without a profile or embedder", async () => {
+    for (const missing of ["profile", "embedder"] as const) {
+      const h = makeHarness({});
+      armGate(h, { accept: false });
+      if (missing === "profile") h.deps.getSpeakerProfile = () => undefined;
+      else h.deps.getSpeakerEmbed = () => undefined;
+      await captureWithSpeech(h);
+      h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+      h.sources[0].emit(Buffer.from([5, 6, 7, 8]));
+      assert.equal(h.controller.getPhase(), "capture");
+      h.endpointers[0].end(1.3);
+      h.utterances[0].handlers.onFinal("normal words");
+      assert.deepEqual(h.host.sent[0], { text: "normal words", opts: undefined });
+    }
   });
 });

@@ -5,7 +5,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { ensureWakeModel, isWakeModelProvisioned, WAKE_MODEL_SHA256, assertSafeMember, ensureVadModel, isVadModelProvisioned, VAD_MODEL_BYTES, VAD_MODEL_SHA256, vadModelPath } from "../src/model.ts";
+import { ensureWakeModel, isWakeModelProvisioned, WAKE_MODEL_SHA256, assertSafeMember, ensureVadModel, isVadModelProvisioned, VAD_MODEL_BYTES, VAD_MODEL_SHA256, vadModelPath, ensureSpeakerModel, isSpeakerModelProvisioned, SPEAKER_MODEL_BYTES, SPEAKER_MODEL_SHA256, speakerModelPath, speakerModelCachedPath } from "../src/model.ts";
 
 const FILES = [
   "encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
@@ -306,5 +306,117 @@ describe("vad model provisioning", () => {
   it("exposes pinned metadata matching the released model", () => {
     assert.equal(VAD_MODEL_BYTES, 643854);
     assert.equal(VAD_MODEL_SHA256, "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6");
+  });
+});
+
+describe("speaker model provisioning", () => {
+  it("exposes pinned metadata matching the released CAM++ model", () => {
+    assert.ok(speakerModelPath("/tmp/x").endsWith("3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"));
+    assert.equal(SPEAKER_MODEL_BYTES, 29596978);
+    assert.equal(SPEAKER_MODEL_SHA256, "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b");
+  });
+
+  it("probes the cached path synchronously", () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pi-voice-spk-"));
+    try {
+      assert.equal(speakerModelCachedPath(cacheRoot), undefined);
+      writeFileSync(speakerModelPath(cacheRoot), Buffer.alloc(16));
+      assert.equal(speakerModelCachedPath(cacheRoot), undefined);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+    assert.ok(speakerModelCachedPath() !== undefined, "expected the real CAM++ model in the default cache");
+  });
+
+  it("reports the default cache as provisioned", async () => {
+    assert.equal(await isSpeakerModelProvisioned(), true);
+  });
+
+  it("skips fetch when already provisioned", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pi-voice-spk-"));
+    try {
+      await writeFileSync(speakerModelPath(cacheRoot), Buffer.from(PAYLOAD));
+      let fetched = false;
+      const dest = await ensureSpeakerModel(new AbortController().signal, {
+        ...baseDeps(cacheRoot, fakeTar([])),
+        fetchImpl: async () => {
+          fetched = true;
+          throw new Error("must not fetch");
+        },
+      } as never);
+      assert.equal(dest, speakerModelPath(cacheRoot));
+      assert.equal(fetched, false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves no file behind on sha mismatch", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pi-voice-spk-bad-"));
+    try {
+      const deps = { ...baseDeps(cacheRoot, fakeTar([])), expectedSha256: WAKE_MODEL_SHA256 };
+      await assert.rejects(() => ensureSpeakerModel(new AbortController().signal, deps as never), /checksum mismatch/);
+      assert.equal(existsSync(speakerModelPath(cacheRoot)), false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces the size cap", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pi-voice-spk-cap-"));
+    try {
+      const deps = { ...baseDeps(cacheRoot, fakeTar([])), maxBytes: 4 };
+      await assert.rejects(() => ensureSpeakerModel(new AbortController().signal, deps as never), /exceeds/);
+      assert.equal(existsSync(speakerModelPath(cacheRoot)), false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("honors abort without fetching", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pi-voice-spk-abort-"));
+    try {
+      let calls = 0;
+      const controller = new AbortController();
+      controller.abort();
+      const deps = {
+        ...baseDeps(cacheRoot, fakeTar([])),
+        fetchImpl: async () => {
+          calls += 1;
+          throw new Error("must not fetch");
+        },
+      };
+      await assert.rejects(() => ensureSpeakerModel(controller.signal, deps as never), /abort/i);
+      assert.equal(calls, 0);
+      assert.equal(existsSync(speakerModelPath(cacheRoot)), false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not install the model when aborted after the last chunk", async () => {
+    const cacheRoot = mkdtempSync(join(tmpdir(), "pi-voice-spk-lateabort-"));
+    try {
+      const controller = new AbortController();
+      const fetchImpl = async (): Promise<{ ok: boolean; status: number; body: AsyncIterable<Uint8Array> }> => ({
+        ok: true,
+        status: 200,
+        body: (async function* () {
+          yield PAYLOAD;
+          controller.abort();
+        })(),
+      });
+      let renamed = false;
+      const deps = {
+        ...baseDeps(cacheRoot, fakeTar([])),
+        fetchImpl,
+        renameImpl: async () => { renamed = true; },
+      };
+      await assert.rejects(() => ensureSpeakerModel(controller.signal, deps as never), /abort/i);
+      assert.equal(renamed, false);
+      assert.equal(existsSync(speakerModelPath(cacheRoot)), false);
+    } finally {
+      rmSync(cacheRoot, { recursive: true, force: true });
+    }
   });
 });

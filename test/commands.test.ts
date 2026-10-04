@@ -4,25 +4,30 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import type { VoicePreferences } from "../src/contracts.ts";
 import { DEFAULT_PREFERENCES } from "../src/contracts.ts";
+import type { SpeakerProfile } from "../src/speaker.ts";
 import {
+  MISSING_INWORLD_KEY_MESSAGE,
   MISSING_KEY_MESSAGE,
   getVoiceCompletions,
   handleVoiceCommand,
   parseVoiceArgs,
   type CommandEnv,
 } from "../src/commands.ts";
+import { ttsProviderOf } from "../src/preferences.ts";
 
-function makeEnv(overrides?: { prefs?: Partial<VoicePreferences>; key?: string }): {
+function makeEnv(overrides?: { prefs?: Partial<VoicePreferences>; key?: string; inworldKey?: string }): {
   env: CommandEnv;
   prefs: VoicePreferences;
   saved: VoicePreferences[];
   notified: { message: string; type?: string }[];
   setKey(next: string | undefined): void;
+  setInworldKey(next: string | undefined): void;
 } {
   const prefs: VoicePreferences = { ...DEFAULT_PREFERENCES, ...overrides?.prefs };
   const saved: VoicePreferences[] = [];
   const notified: { message: string; type?: string }[] = [];
   let key = overrides?.key ?? "test-key";
+  let inworldKey = overrides?.inworldKey ?? "inworld-key";
   const starts: number[] = [];
   const env: CommandEnv = {
     controller: {
@@ -55,6 +60,11 @@ function makeEnv(overrides?: { prefs?: Partial<VoicePreferences>; key?: string }
     listVoices: async () => [{ id: "voice-abc123", name: "Rachel" }],
     listModels: async () => ["eleven_v4_turbo", "eleven_flash_v2_5"],
     getKey: () => key,
+    getTtsProvider: () => ttsProviderOf(prefs),
+    getInworldKey: () => inworldKey,
+    inworldKeyPresent: () => inworldKey !== undefined,
+    inworldKeyLast4: () => (inworldKey ? inworldKey.slice(-4) : undefined),
+    listInworldVoices: async () => [{ id: "Ashley", name: "Ashley" }],
     runTest: async (kind: string) => `${kind} ok`,
   };
   return {
@@ -64,6 +74,9 @@ function makeEnv(overrides?: { prefs?: Partial<VoicePreferences>; key?: string }
     notified,
     setKey(next: string | undefined): void {
       key = next as string;
+    },
+    setInworldKey(next: string | undefined): void {
+      inworldKey = next as string;
     },
   };
 }
@@ -91,6 +104,9 @@ describe("parser", () => {
     assert.deepEqual(parseVoiceArgs("id voice-abc123"), { sub: "id", value: "voice-abc123" });
     assert.deepEqual(parseVoiceArgs("voice"), { sub: "id", value: "voice" });
     assert.deepEqual(parseVoiceArgs("bogus"), { sub: "id", value: "bogus" });
+    assert.deepEqual(parseVoiceArgs("provider"), { sub: "provider", value: undefined });
+    assert.deepEqual(parseVoiceArgs("provider inworld"), { sub: "provider", value: "inworld" });
+    assert.deepEqual(parseVoiceArgs("Ashley"), { sub: "id", value: "Ashley" });
   });
 });
 
@@ -122,8 +138,8 @@ describe("completions", () => {
     assert.ok(plain?.some((i) => i.value === "mic default"));
   });
 
-  it("voice completions show names and insert ids", async () => {
-    const { env } = makeEnv();
+  it("voice completions use the elevenlabs list when it is the active provider", async () => {
+    const { env } = makeEnv({ prefs: { ttsProvider: "elevenlabs" } });
     for (const prefix of ["list ra", "id ra"]) {
       const items = await getVoiceCompletions(prefix, env);
       assert.equal(items?.length, 1, prefix);
@@ -132,19 +148,57 @@ describe("completions", () => {
     }
   });
 
-  it("bare partial id completes matching voices", async () => {
+  it("voice completions use the inworld list when it is the active provider", async () => {
     const { env } = makeEnv();
-    const items = await getVoiceCompletions("voice-ab", env);
-    assert.ok(items?.some((i) => i.value === "voice-abc123"), JSON.stringify(items));
-    const bare = await getVoiceCompletions("", env);
-    assert.ok(bare?.some((i) => i.value === "list"), JSON.stringify(bare));
-    assert.ok(bare?.some((i) => i.value === "voice-abc123"), JSON.stringify(bare));
+    for (const prefix of ["list ash", "id ash"]) {
+      const items = await getVoiceCompletions(prefix, env);
+      assert.equal(items?.length, 1, prefix);
+      assert.equal(items?.[0].value, `${prefix.split(" ")[0]} Ashley`);
+      assert.ok(items?.[0].label.includes("Ashley"));
+    }
   });
 
-  it("model completions fall back offline without a key", async () => {
-    const { env } = makeEnv({ key: undefined });
+  it("bare partial id completes matching voices for the active provider", async () => {
+    const { env } = makeEnv();
+    const items = await getVoiceCompletions("ash", env);
+    assert.ok(items?.some((i) => i.value === "Ashley"), JSON.stringify(items));
+    const el = makeEnv({ prefs: { ttsProvider: "elevenlabs" } });
+    const eleven = await getVoiceCompletions("voice-ab", el.env);
+    assert.ok(eleven?.some((i) => i.value === "voice-abc123"), JSON.stringify(eleven));
+    const bare = await getVoiceCompletions("", env);
+    assert.ok(bare?.some((i) => i.value === "provider"), JSON.stringify(bare));
+    assert.ok(bare?.some((i) => i.value === "Ashley"), JSON.stringify(bare));
+  });
+
+  it("model completions fall back offline without a key (elevenlabs)", async () => {
+    const { env } = makeEnv({ prefs: { ttsProvider: "elevenlabs" }, key: undefined });
     const items = await getVoiceCompletions("model eleven_", env);
     assert.ok(items?.some((i) => i.value === "model eleven_flash_v2_5"));
+  });
+
+  it("model completions list inworld models without network", async () => {
+    const { env } = makeEnv();
+    let fetched = false;
+    const probe = {
+      ...env,
+      listInworldVoices: async (): Promise<never> => {
+        fetched = true;
+        throw new Error("must not fetch");
+      },
+    };
+    const items = await getVoiceCompletions("model ", probe);
+    assert.ok(items?.some((i) => i.value === "model inworld-tts-2"), JSON.stringify(items));
+    assert.ok(items?.some((i) => i.value === "model inworld-tts-2-flash"), JSON.stringify(items));
+    assert.equal(fetched, false);
+  });
+
+  it("provider completes inworld|elevenlabs", async () => {
+    const { env } = makeEnv();
+    const items = await getVoiceCompletions("provider ", env);
+    assert.deepEqual(
+      items?.map((h) => h.value).sort(),
+      ["provider elevenlabs", "provider inworld"],
+    );
   });
 
   it("never fetches voices while completing other subcommands", async () => {
@@ -167,7 +221,7 @@ describe("completions", () => {
     const kinds = await getVoiceCompletions("test ", env);
     assert.deepEqual(
       kinds?.map((h) => h.value).sort(),
-      ["test mic", "test stt", "test tts", "test wake"],
+      ["test mic", "test speaker", "test stt", "test tts", "test wake"],
     );
     const modes = await getVoiceCompletions("send ", env);
     assert.deepEqual(
@@ -183,8 +237,8 @@ describe("completions", () => {
 });
 
 describe("handler", () => {
-  it("persists wake, sensitivity, and ttsModel changes", async () => {
-    const { env, prefs, saved, notified } = makeEnv();
+  it("persists wake, sensitivity, and ttsModel changes (elevenlabs)", async () => {
+    const { env, prefs, saved, notified } = makeEnv({ prefs: { ttsProvider: "elevenlabs" } });
     const ctx = ctxFor(notified);
     await handleVoiceCommand("wake hey-pi", ctx, env);
     await handleVoiceCommand("sensitivity high", ctx, env);
@@ -195,8 +249,60 @@ describe("handler", () => {
     assert.equal(saved.length, 3);
   });
 
-  it("shows the missing-key message for key-dependent actions", async () => {
-    const bag = makeEnv({ key: undefined });
+  it("model selects the inworld model for the inworld provider", async () => {
+    const { env, prefs, notified } = makeEnv();
+    await handleVoiceCommand("model inworld-tts-2-flash", ctxFor(notified), env);
+    assert.equal(prefs.inworldModel, "inworld-tts-2-flash");
+    assert.equal(prefs.ttsModel, "eleven_flash_v2_5");
+    const ctx = ctxFor(notified);
+    await handleVoiceCommand("model", ctx, env);
+    assert.ok(notified.some((n) => n.message.includes("inworld-tts-2")));
+  });
+
+  it("provider shows the current provider, switches, and rejects junk", async () => {
+    const { env, prefs, notified } = makeEnv();
+    const ctx = ctxFor(notified);
+    await handleVoiceCommand("provider", ctx, env);
+    assert.ok(notified.some((n) => n.message === "provider: inworld"));
+    await handleVoiceCommand("provider elevenlabs", ctx, env);
+    assert.equal(prefs.ttsProvider, "elevenlabs");
+    assert.ok(notified.some((n) => n.message === "provider: elevenlabs"));
+    await handleVoiceCommand("provider bogus", ctx, env);
+    assert.ok(notified.some((n) => /Usage: \/voice provider \[inworld\|elevenlabs\]/.test(n.message)));
+    assert.equal(prefs.ttsProvider, "elevenlabs");
+  });
+
+  it("list and id act on the active provider", async () => {
+    const bag = makeEnv();
+    await handleVoiceCommand("list", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => n.message.includes("Ashley")));
+    await handleVoiceCommand("Hades", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.inworldVoiceId, "Hades");
+    assert.equal(bag.prefs.voiceId, undefined);
+    const el = makeEnv({ prefs: { ttsProvider: "elevenlabs" } });
+    await handleVoiceCommand("list", ctxFor(el.notified), el.env);
+    assert.ok(el.notified.some((n) => n.message.includes("Rachel")));
+    await handleVoiceCommand("voice-abc123", ctxFor(el.notified), el.env);
+    assert.equal(el.prefs.voiceId, "voice-abc123");
+    assert.equal(el.prefs.inworldVoiceId, undefined);
+  });
+
+  it("tts on uses the active provider key and elevenlabs still needs a voice", async () => {
+    const el = makeEnv({ prefs: { ttsProvider: "elevenlabs" } });
+    await handleVoiceCommand("tts on", ctxFor(el.notified), el.env);
+    assert.ok(el.notified.some((n) => /Select a voice first/.test(n.message)));
+    assert.equal(el.prefs.tts, false);
+    el.prefs.voiceId = "voice-abc123";
+    await handleVoiceCommand("tts on", ctxFor(el.notified), el.env);
+    assert.equal(el.prefs.tts, true);
+    const iw = makeEnv();
+    await handleVoiceCommand("tts on", ctxFor(iw.notified), iw.env);
+    assert.equal(iw.prefs.tts, true);
+    assert.ok(iw.notified.some((n) => n.message === "tts on"));
+  });
+
+  it("shows the elevenlabs missing-key message for key-dependent actions", async () => {
+    const bag = makeEnv({ prefs: { ttsProvider: "elevenlabs" }, key: undefined });
     bag.setKey(undefined);
     const ctx = ctxFor(bag.notified);
     await handleVoiceCommand("on", ctx, bag.env);
@@ -206,12 +312,28 @@ describe("handler", () => {
     for (const n of bag.notified) assert.equal(n.message, MISSING_KEY_MESSAGE);
   });
 
-  it("status never shows the full key", async () => {
-    const { env, notified } = makeEnv({ key: "sk-secret-1234" });
+  it("shows the inworld missing-key message for inworld tts gating", async () => {
+    const bag = makeEnv({ inworldKey: undefined });
+    bag.setInworldKey(undefined);
+    const ctx = ctxFor(bag.notified);
+    await handleVoiceCommand("list", ctx, bag.env);
+    await handleVoiceCommand("tts on", ctx, bag.env);
+    await handleVoiceCommand("test tts", ctx, bag.env);
+    assert.ok(bag.notified.length >= 3);
+    for (const n of bag.notified) assert.equal(n.message, MISSING_INWORLD_KEY_MESSAGE);
+  });
+
+  it("status never shows full keys and covers provider, voice, model, and both suffixes", async () => {
+    const { env, notified } = makeEnv({ key: "sk-secret-1234", inworldKey: "iw-secret-5678" });
     await handleVoiceCommand("status", ctxFor(notified), env);
     const text = notified.map((n) => n.message).join("\n");
     assert.ok(!text.includes("sk-secret-1234"));
-    assert.ok(text.includes("••••1234"));
+    assert.ok(!text.includes("iw-secret-5678"));
+    assert.ok(text.includes("provider: inworld"));
+    assert.ok(text.includes("voice: Ashley"));
+    assert.ok(text.includes("tts model: inworld-tts-2"));
+    assert.ok(text.includes("elevenlabs key: present ••••1234"));
+    assert.ok(text.includes("inworld key: present ••••5678"));
   });
 
   it("mic selection accepts quoted names with spaces", async () => {
@@ -220,8 +342,18 @@ describe("handler", () => {
     assert.deepEqual(prefs.mic, { kind: "named", name: "iPhone Microphone" });
   });
 
-  it("bare id saves without a key", async () => {
+  it("bare id saves the inworld voice without a key", async () => {
     const bag = makeEnv();
+    bag.setInworldKey(undefined);
+    const ctx = ctxFor(bag.notified);
+    await handleVoiceCommand("Ashley", ctx, bag.env);
+    assert.equal(bag.prefs.inworldVoiceId, "Ashley");
+    assert.equal(bag.saved.length, 1);
+    assert.ok(bag.notified.some((n) => n.message === "voice: Ashley"));
+  });
+
+  it("bare id saves the elevenlabs voice without a key", async () => {
+    const bag = makeEnv({ prefs: { ttsProvider: "elevenlabs" } });
     bag.setKey(undefined);
     const ctx = ctxFor(bag.notified);
     await handleVoiceCommand("voice-abc123", ctx, bag.env);
@@ -230,19 +362,33 @@ describe("handler", () => {
     assert.ok(bag.notified.some((n) => n.message === "voice: voice-abc123"));
   });
 
-  it("id alias saves without a key", async () => {
+  it("id alias saves the inworld voice without a key", async () => {
     const bag = makeEnv();
+    bag.setInworldKey(undefined);
+    const ctx = ctxFor(bag.notified);
+    await handleVoiceCommand("id Hades", ctx, bag.env);
+    assert.equal(bag.prefs.inworldVoiceId, "Hades");
+  });
+
+  it("id alias saves the elevenlabs voice without a key", async () => {
+    const bag = makeEnv({ prefs: { ttsProvider: "elevenlabs" } });
     bag.setKey(undefined);
     const ctx = ctxFor(bag.notified);
     await handleVoiceCommand("id voice-abc123", ctx, bag.env);
     assert.equal(bag.prefs.voiceId, "voice-abc123");
   });
 
-  it("test tts warns that it is billable", async () => {
-    const { env, prefs, notified } = makeEnv();
-    prefs.voiceId = "voice-abc123";
+  it("test tts warns that it is billable (inworld needs no voice selection)", async () => {
+    const { env, notified } = makeEnv();
     await handleVoiceCommand("test tts", ctxFor(notified), env);
     assert.ok(notified.some((n) => /billable/.test(n.message)));
+  });
+
+  it("test tts still needs an elevenlabs voice for that provider", async () => {
+    const { env, notified } = makeEnv({ prefs: { ttsProvider: "elevenlabs" } });
+    await handleVoiceCommand("test tts", ctxFor(notified), env);
+    assert.ok(notified.some((n) => /Select a voice first/.test(n.message)));
+    assert.ok(!notified.some((n) => /billable/.test(n.message)));
   });
 
   it("send reports the current mode with no value, sets it, and rejects junk", async () => {
@@ -298,11 +444,238 @@ describe("handler", () => {
     assert.ok(text.includes("vad model: provisioned"));
   });
 
-  it("help lists send and the review-mode line", async () => {
+  it("help lists provider, send, and the review-mode line", async () => {
     const { env, notified } = makeEnv();
     await handleVoiceCommand("help", ctxFor(notified), env);
     const text = notified.map((n) => n.message).join("\n");
+    assert.ok(text.includes("/voice provider [inworld|elevenlabs]"));
     assert.ok(text.includes("/voice send auto|review"));
     assert.ok(text.includes('"hey pi, send" also works'));
+  });
+});
+
+describe("isolation and speaker commands", () => {
+  type CaptureResult =
+    | { status: "ok"; pcm: Buffer; speechMs: number }
+    | { status: "too-short"; speechMs: number }
+    | { status: "cancelled" };
+
+  function makeSpokedEnv(
+    bag: ReturnType<typeof makeEnv>,
+    opts?: {
+      profile?: SpeakerProfile | undefined;
+      captures?: CaptureResult[];
+      captureImpl?: (prompt: string, o: { signal: AbortSignal }) => Promise<CaptureResult>;
+      helperBuilt?: boolean;
+      fallback?: boolean;
+    },
+  ): { saved: SpeakerProfile[]; captures: number; deleted: number } {
+    let profile: SpeakerProfile | undefined = opts && "profile" in opts ? opts.profile : {
+      version: 1,
+      model: "/tmp/speaker.onnx",
+      dim: 2,
+      centroid: [1, 0],
+      enrolledAt: "2026-01-02T00:00:00.000Z",
+      enrollScores: [0.92, 0.88, 0.9, 0.91, 0.89],
+      suggestedThreshold: 0.78,
+    };
+    const saved: SpeakerProfile[] = [];
+    let captures = 0;
+    let deleted = 0;
+    const queue = [...(opts?.captures ?? [])];
+    bag.env.voiceIo = {
+      helperBuilt: () => opts?.helperBuilt ?? true,
+      isActive: () => false,
+      hadFallback: () => opts?.fallback ?? false,
+      ensureHelper: async () => "/tmp/voice-io",
+    };
+    bag.env.speaker = {
+      loadProfile: async () => profile,
+      saveProfile: async (p) => {
+        saved.push(p);
+        profile = p;
+      },
+      deleteProfile: async () => {
+        profile = undefined;
+        deleted++;
+      },
+      ensureModel: async () => "/tmp/speaker.onnx",
+      modelCachedPath: () => "/tmp/speaker.onnx",
+      createEmbedder: () => ({
+        embed: () => new Float32Array([1, 0]),
+      }),
+      buildProfile: (embeddings, model) => ({
+        version: 1 as const,
+        model,
+        dim: 2,
+        centroid: [1, 0],
+        enrolledAt: "2026-01-02T00:00:00.000Z",
+        enrollScores: embeddings.map(() => 0.9),
+        suggestedThreshold: 0.78,
+      }),
+      capturePhrase:
+        opts?.captureImpl ??
+        (async (): Promise<CaptureResult> => {
+          captures++;
+          return queue.shift() ?? { status: "ok", pcm: Buffer.from([1, 2, 3, 4]), speechMs: 2000 };
+        }),
+    };
+    return {
+      saved,
+      get captures(): number {
+        return captures;
+      },
+      get deleted(): number {
+        return deleted;
+      },
+    };
+  }
+
+  it("parses the new subcommands", () => {
+    assert.deepEqual(parseVoiceArgs("isolation"), { sub: "isolation", value: undefined });
+    assert.deepEqual(parseVoiceArgs("isolation off"), { sub: "isolation", value: "off" });
+    assert.deepEqual(parseVoiceArgs("enroll"), { sub: "enroll", value: undefined });
+    assert.deepEqual(parseVoiceArgs("speaker high"), { sub: "speaker", value: "high" });
+    assert.deepEqual(parseVoiceArgs("test speaker"), { sub: "test", value: "speaker" });
+  });
+
+  it("completes isolation, speaker, and test speaker", async () => {
+    const { env } = makeEnv();
+    assert.deepEqual((await getVoiceCompletions("isolation ", env))?.map((h) => h.value).sort(), ["isolation off", "isolation on"]);
+    assert.deepEqual((await getVoiceCompletions("speaker ", env))?.map((h) => h.value).sort(), [
+      "speaker forget",
+      "speaker high",
+      "speaker low",
+      "speaker normal",
+      "speaker off",
+    ]);
+    const roots = (await getVoiceCompletions("e", env))?.map((h) => h.value) ?? [];
+    assert.ok(roots.includes("enroll"), "missing enroll");
+    const iroots = (await getVoiceCompletions("is", env))?.map((h) => h.value) ?? [];
+    assert.ok(iroots.includes("isolation"), "missing isolation");
+    const sroots = (await getVoiceCompletions("s", env))?.map((h) => h.value) ?? [];
+    for (const sub of ["send", "setup", "speaker", "status", "sensitivity"]) {
+      assert.ok(sroots.includes(sub), `missing ${sub}`);
+    }
+  });
+
+  it("isolation shows helper state and toggles the preference", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag);
+    await handleVoiceCommand("isolation", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /isolation: on \(helper built/.test(n.message)));
+    await handleVoiceCommand("isolation off", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.isolation, false);
+    assert.ok(bag.notified.some((n) => n.message.startsWith("isolation: off")));
+    await handleVoiceCommand("isolation maybe", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => n.message === "Usage: /voice isolation on|off"));
+  });
+
+  it("speaker shows level, sets strictness, and forgets the profile", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag);
+    await handleVoiceCommand("speaker", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /speaker check: normal.*enrolled 2026-01-02/.test(n.message)));
+    await handleVoiceCommand("speaker high", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.speakerCheck, "high");
+    await handleVoiceCommand("speaker forget", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => n.message === "Speaker profile deleted."));
+    await handleVoiceCommand("speaker", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /not enrolled/.test(n.message)));
+    await handleVoiceCommand("speaker bogus", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => n.message === "Usage: /voice speaker off|low|normal|high|forget"));
+  });
+
+  it("enroll guides five phrases, embeds, saves, and reports scores", async () => {
+    const bag = makeEnv();
+    let starts = 0;
+    const origStart = bag.env.controller.start.bind(bag.env.controller);
+    bag.env.controller.start = async (): Promise<void> => {
+      starts++;
+      await origStart();
+    };
+    const sp = makeSpokedEnv(bag, { profile: undefined });
+    await handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((n) => n.message).join("\n");
+    assert.ok(text.includes('Enroll 1/5: read aloud'));
+    assert.ok(text.includes('Enroll 5/5: read aloud'));
+    assert.equal(sp.saved.length, 1);
+    assert.ok(/Enrolled 5 clips. Scores: .* Threshold: suggested 0\.78 \(effective 0\.78 at normal\)\./.test(text));
+    assert.equal(starts, 1);
+  });
+
+  it("enroll repeats a too-short phrase", async () => {
+    const bag = makeEnv();
+    let calls = 0;
+    makeSpokedEnv(bag, {
+      profile: undefined,
+      captureImpl: async (): Promise<CaptureResult> => {
+        calls++;
+        if (calls === 1) return { status: "too-short", speechMs: 400 };
+        return { status: "ok", pcm: Buffer.from([5, 6]), speechMs: 2000 };
+      },
+    });
+    await handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /Too short/.test(n.message)));
+    assert.ok(bag.notified.some((n) => /Enrolled 5 clips/.test(n.message)));
+    assert.equal(calls, 6);
+  });
+
+  it("enroll is cancellable with /voice off and does not resume listening", async () => {
+    const bag = makeEnv();
+    let starts = 0;
+    const origStart = bag.env.controller.start.bind(bag.env.controller);
+    bag.env.controller.start = async (): Promise<void> => {
+      starts++;
+      await origStart();
+    };
+    makeSpokedEnv(bag, {
+      profile: undefined,
+      captureImpl: (_prompt, { signal }) =>
+        new Promise<CaptureResult>((resolve) => {
+          signal.addEventListener("abort", () => resolve({ status: "cancelled" }), { once: true });
+        }),
+    });
+    const startsBefore = starts;
+    const pending = handleVoiceCommand("enroll", ctxFor(bag.notified), bag.env);
+    await new Promise((resolve) => setImmediate(resolve));
+    await handleVoiceCommand("off", ctxFor(bag.notified), bag.env);
+    await pending;
+    assert.ok(bag.notified.some((n) => /Enrollment cancelled/.test(n.message)));
+    assert.equal(starts, startsBefore);
+  });
+
+  it("test speaker reports score vs threshold and submits nothing", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag);
+    await handleVoiceCommand("test speaker", ctxFor(bag.notified), bag.env);
+    assert.ok(
+      bag.notified.some((n) => /speaker test: score 1\.00 vs threshold 0\.78 \(normal\) — accept \(nothing submitted\)/.test(n.message)),
+    );
+  });
+
+  it("test speaker is off without a profile", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag, { profile: undefined });
+    await handleVoiceCommand("test speaker", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /Speaker check is off/.test(n.message)));
+  });
+
+  it("setup reports the helper and speaker model results", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag);
+    await handleVoiceCommand("setup", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((n) => n.message).join("\n");
+    assert.ok(text.includes("voice isolation helper: built (/tmp/voice-io)"));
+    assert.ok(text.includes("speaker model: provisioned"));
+  });
+
+  it("status shows isolation and speaker lines", async () => {
+    const bag = makeEnv();
+    makeSpokedEnv(bag);
+    await handleVoiceCommand("status", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((n) => n.message).join("\n");
+    assert.ok(text.includes("isolation: on (helper built"));
+    assert.ok(text.includes("speaker check: normal (enrolled 2026-01-02"));
   });
 });

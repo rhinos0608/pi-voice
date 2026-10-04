@@ -100,6 +100,30 @@ describe("createDebugLog", () => {
     });
   });
 
+  it("redacts the live INWORLD_API_KEY value wherever it appears", () => {
+    withEnv("INWORLD_API_KEY", "iw-live-abcdefgh", () => {
+      const { fs, written } = makeSpy();
+      const log = createDebugLog({ enabled: true, dir: "/tmp/pv-debug", fs });
+      log.log("e", { msg: "using iw-live-abcdefgh now", arr: ["iw-live-abcdefgh"] });
+      const line = JSON.parse(written[0] as string);
+      assert.equal(line.msg, "using [redacted] now");
+      assert.equal(line.arr[0], "[redacted]");
+    });
+  });
+
+  it("redacts Authorization Basic credentials", () => {
+    withEnv("ELEVENLABS_API_KEY", undefined, () => {
+      withEnv("INWORLD_API_KEY", undefined, () => {
+        const { fs, written } = makeSpy();
+        const log = createDebugLog({ enabled: true, dir: "/tmp/pv-debug", fs });
+        log.log("e", { msg: "header Basic c2VjcmV0LWtleQ== sent", other: "Bearer abc123 stays" });
+        const line = JSON.parse(written[0] as string);
+        assert.equal(line.msg, "header Basic [redacted] sent");
+        assert.equal(line.other, "Bearer abc123 stays");
+      });
+    });
+  });
+
   it("ignores short ELEVENLABS_API_KEY values", () => {
     withEnv("ELEVENLABS_API_KEY", "short", () => {
       const { fs, written } = makeSpy();

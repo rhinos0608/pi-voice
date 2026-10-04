@@ -1,10 +1,21 @@
 /** Shared contracts for pi-voice (lane A foundation). */
 
+/** TTS provider: Inworld (default) or ElevenLabs. STT is always ElevenLabs. */
+export type TtsProvider = "inworld" | "elevenlabs";
+
 /** Persisted user preferences (schema version 1). */
 export type VoicePreferences = {
   version: 1;
+  /** Active TTS provider (default "inworld"). */
+  ttsProvider: TtsProvider;
+  /** ElevenLabs voice id (ElevenLabs provider only). */
   voiceId?: string;
+  /** ElevenLabs TTS model id. */
   ttsModel?: string;
+  /** Inworld voice id (display name like "Ashley"); default applies when unset. */
+  inworldVoiceId?: string;
+  /** Inworld TTS model id; default applies when unset. */
+  inworldModel?: string;
   wake: "hey-pi" | "hi-pi" | "both";
   sensitivity: "low" | "normal" | "high";
   mic: { kind: "default" } | { kind: "named"; name: string };
@@ -12,10 +23,15 @@ export type VoicePreferences = {
   tts: boolean;
   /** auto: submit transcripts immediately; review: paste into the editor, submit on Enter or "send to pi". */
   sendMode: "auto" | "review";
+  /** Voice-isolation helper (echo cancellation, noise suppression, AGC). Default on when built. */
+  isolation: boolean;
+  /** Owner-voice check strictness. Effective only when a speaker profile is enrolled. */
+  speakerCheck: "off" | "low" | "normal" | "high";
 };
 
 export const DEFAULT_PREFERENCES: VoicePreferences = {
   version: 1,
+  ttsProvider: "inworld",
   ttsModel: "eleven_flash_v2_5",
   wake: "both",
   sensitivity: "normal",
@@ -23,7 +39,22 @@ export const DEFAULT_PREFERENCES: VoicePreferences = {
   autostart: true,
   tts: false,
   sendMode: "auto",
+  isolation: true,
+  speakerCheck: "normal",
 };
+
+/** Threshold offset applied to profile.suggestedThreshold per strictness level. */
+export const SPEAKER_CHECK_OFFSETS: Record<VoicePreferences["speakerCheck"], number> = {
+  off: 0,
+  low: -0.05,
+  normal: 0,
+  high: 0.05,
+};
+
+/** Effective accept threshold for a strictness level over a profile suggestion. */
+export function speakerThresholdFor(suggested: number, level: VoicePreferences["speakerCheck"]): number {
+  return suggested + (SPEAKER_CHECK_OFFSETS[level] ?? 0);
+}
 
 /** Session-scoped voice pipeline phase. */
 export type VoicePhase = "off" | "preparing" | "wake" | "capture" | "submit" | "speaking";

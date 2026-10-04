@@ -301,10 +301,16 @@ export function startSpeech(options: StartSpeechOptions, deps?: StartSpeechDeps)
       if (chunks === 0) log("tts-ws-first-audio", { bytes: audio.length, ms: elapsed() });
       chunks += 1;
       bytes += audio.length;
-      chain = chain.then(() => {
-        if (settled || cancelled || gen !== generation) return;
-        return sink.write(audio);
-      });
+      chain = chain
+        .then(async () => {
+          if (settled || cancelled || gen !== generation) return;
+          try {
+            await sink.write(audio);
+          } catch (err: unknown) {
+            failFrom("sink-write", err);
+          }
+        })
+        .catch(() => undefined);
     }
     if (finalFlag || msg.audio === null || msg.audio === undefined) {
       if (finalFlag || msg.audio === null) {

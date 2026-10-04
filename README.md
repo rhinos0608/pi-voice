@@ -11,7 +11,8 @@ Voice wake-word input + speech output for Pi (macOS). Say **"hey pi"** or
   post-wake audio becomes a Pi prompt. While Pi is busy the transcript queues
   as a follow-up.
 - **Text-to-speech** (optional, `/voice tts on`): assistant prose streams to
-  ElevenLabs and plays locally. Code, URLs, and link destinations are never
+  Inworld by default (ElevenLabs selectable via `/voice provider elevenlabs`)
+  and plays locally. Code, URLs, and link destinations are never
   spoken. Saying the wake word (or typing) barges in and cancels playback.
 - One `/voice` slash command with subcommand completions; footer status
   (`🎙 listening`, live partials, `🎙 transcribing…`, `🔊 speaking`, `voice off`).
@@ -40,13 +41,16 @@ Voice wake-word input + speech output for Pi (macOS). Say **"hey pi"** or
 - Wake detection runs fully on-device; no audio leaves the machine until the
   wake word fires. An accidental wake can still submit overheard room audio
   as a prompt — keep the mic off when not in use.
-- After the wake word, microphone audio goes to ElevenLabs (Scribe). With
-  TTS on, the assistant's prose goes to ElevenLabs (TTS). Both are billable
-  ElevenLabs usage.
-- The API key comes only from `ELEVENLABS_API_KEY`. It is never stored,
-  logged, or shown (status shows the last 4 characters only).
-- Preferences (voice, wake phrase, sensitivity, mic, autostart, TTS, TTS
-  model, send mode) live in `~/Library/Application Support/pi-voice/state.json`.
+- After the wake word, microphone audio goes to ElevenLabs (Scribe STT).
+  With TTS on, the assistant's prose goes to Inworld (TTS, the default
+  provider) or ElevenLabs (TTS, when selected via `/voice provider
+  elevenlabs`). Both are billable third-party usage.
+- API keys come only from the environment: `ELEVENLABS_API_KEY` (STT and
+  ElevenLabs TTS) and `INWORLD_API_KEY` (Inworld TTS). They are never
+  stored, logged, or shown (status shows the last 4 characters only).
+- Preferences (TTS provider, voice, wake phrase, sensitivity, mic,
+  autostart, TTS, TTS model, send mode) live in
+  `~/Library/Application Support/pi-voice/state.json`.
   No transcripts, audio, or keys are persisted there.
 
 ## Install
@@ -54,7 +58,13 @@ Voice wake-word input + speech output for Pi (macOS). Say **"hey pi"** or
 ```sh
 pi install ~/pi-voice
 # add to ~/.zshrc, then restart the shell / Pi:
-export ELEVENLABS_API_KEY="..."
+export ELEVENLABS_API_KEY="..."  # speech-to-text (Scribe) + wake gating
+```
+
+For spoken replies (TTS, on by default via Inworld), also export:
+
+```sh
+export INWORLD_API_KEY="..."  # text-to-speech (Inworld, default provider)
 ```
 
 Then inside Pi:
@@ -62,28 +72,84 @@ Then inside Pi:
 ```
 /voice setup   # checks ffmpeg/ffplay, provisions the wake model, mic help
 /voice on      # enable the mic for this session
-/voice tts on  # needs a selected voice: /voice <voice-id>
+/voice tts on  # speaks with the default Inworld voice (Ashley); pick another via /voice list
 ```
+
+Prefer ElevenLabs for speech too? `export ELEVENLABS_API_KEY`, then
+`/voice provider elevenlabs` and `/voice <voice-id>` to pick a voice.
 
 ## Command reference
 
 | Input | Behavior |
 |---|---|
-| `/voice`, `/voice status` | Mic state, wake mode, device, TTS state, voice, key suffix |
+| `/voice`, `/voice status` | Mic state, wake mode, device, TTS state, provider, voice, model, both key suffixes |
 | `/voice on`, `/voice off` | Start/stop wake listening for this session |
 | `/voice setup` | Check binaries/env, provision the wake-word and VAD models, mic-permission guidance. Does not enable the mic |
-| `/voice tts on\|off` | Session speech toggle (saved); `on` needs key + voice |
-| `/voice list` | List ElevenLabs voices (needs key) |
-| `/voice <voice-id>` | Select the TTS voice by id (saved, no key needed) |
-| `/voice id <id>` | Select the TTS voice by id (explicit form) |
-| `/voice model [id]` | List or select the TTS model (default `eleven_flash_v2_5`; `eleven_v4_*` models are rejected by the streaming endpoint) |
+| `/voice provider [inworld\|elevenlabs]` | Show or select the TTS provider (default `inworld`; STT stays ElevenLabs). Bare `/voice provider` shows the current provider |
+| `/voice tts on\|off` | Session speech toggle (saved); `on` needs the active provider's key (ElevenLabs also needs a selected voice) |
+| `/voice list` | List active-provider voices (needs that provider's key) |
+| `/voice <voice-id>` | Select the active-provider voice by id (saved, no key needed; Inworld ids are names like `Ashley`) |
+| `/voice id <id>` | Select the active-provider voice by id (explicit form) |
+| `/voice model [id]` | List or select the active-provider TTS model (Inworld: `inworld-tts-2` default, `inworld-tts-2-flash`; ElevenLabs: default `eleven_flash_v2_5`, `eleven_v4_*` models are rejected by the streaming endpoint) |
 | `/voice wake hey-pi\|hi-pi\|both` | Which phrases the local spotter listens for |
 | `/voice sensitivity low\|normal\|high` | Detection strictness (default `normal`) |
 | `/voice mic list\|default\|<name>` | Pick by AVFoundation device name; quote names with spaces (`"iPhone Microphone"`). A missing saved mic falls back to default with a notice |
 | `/voice autostart on\|off` | Auto-listen at session start when the model is cached and the key is present (default on; never downloads at startup) |
+| `/voice isolation on\|off` | Echo-cancelling helper capture + playback (default on when built). Bare shows state and whether the helper is built |
+| `/voice enroll` | Guided owner-voice enrollment (cancel with `/voice off`; audio never written to disk) |
+| `/voice speaker off\|low\|normal\|high\|forget` | Owner-voice check strictness (default `normal`), or delete the voice profile |
 | `/voice send auto\|review` | `auto` submits transcripts immediately; `review` stages them in the Pi editor. Bare `/voice send` shows the current mode |
-| `/voice test mic\|wake\|stt\|tts` | `mic`: 2 s capture with input level; `wake`: ~10 s offline listen (nothing submitted); `stt`: 8 s live capture reporting commit→transcript latency; `tts`: billable spoken test phrase |
+| `/voice test mic\|wake\|stt\|tts\|speaker` | `mic`: 2 s capture with input level; `wake`: ~10 s offline listen (nothing submitted); `stt`: 8 s live capture reporting commit→transcript latency; `tts`: billable spoken test phrase; `speaker`: one utterance scored vs threshold, nothing submitted |
 | `/voice help` | This summary in-session |
+
+## Voice isolation
+
+Two opt-out layers keep room noise and other voices out of your prompts.
+Both default on and degrade gracefully when their build artifacts are missing.
+
+**Noise suppression + echo cancellation (isolation).** When `/voice
+isolation` is on (default) and the helper is built, capture and TTS playback
+both run through one native helper process (`native/voice-io.swift`, compiled
+to `~/Library/Application Support/pi-voice/bin/`) using Apple's voice
+processing: echo cancellation of pi-voice's own playback, noise suppression,
+and automatic gain control. This replaces the ffmpeg mic and ffplay sink for
+the session. Notes:
+
+- Echo cancellation covers **only pi-voice's own playback** (TTS spoken
+  through the helper). Audio from other apps is not cancelled — a headset is
+  still the most reliable setup.
+- While the helper runs, macOS exposes its **Control Center → Microphone →
+  Voice Isolation** mic mode for the helper's input. That toggle is
+  user-selected and cannot be forced on programmatically; it is separate from
+  `/voice isolation`.
+- If the helper fails to start (missing device, engine error, crash), voice
+  falls back to ffmpeg/ffplay for the session with a one-time warning.
+  Microphone-permission denial keeps the existing System Settings guidance.
+- The helper is **never compiled at session start** (like the models, no work
+  at startup). `/voice setup` builds it and reports the result.
+- Building requires the **Xcode command line tools** (`xcrun swiftc`):
+  `xcode-select --install`.
+
+**Owner-voice check (speaker).** `/voice enroll` records
+a short guided enrollment (5 varied phrases shown one at a time, ~1.5 s of
+speech each, up to ~6 s per phrase; too-short takes are repeated) and stores a
+numeric voice profile. Later utterances are scored against it: strangers hear
+an error cue and a brief `🎙 not your voice`, and nothing is submitted (in
+review mode, nothing lands in the editor either).
+
+- Strictness: `/voice speaker off|low|normal|high` (default `normal`).
+  Each level offsets the enrolled threshold by low −0.05 / normal +0 /
+  high +0.05.
+- Thresholds are **provisional**: calibrate with `/voice test speaker`, which
+  captures one utterance and reports score vs threshold without submitting
+  anything. Raise the level if lookalike voices pass; lower it if you get
+  rejected.
+- The check runs only when a profile is enrolled **and** the speaker model is
+  cached; otherwise it is silently off (status says so).
+- **Privacy:** the profile is a numeric embedding (no audio) stored with mode
+  `0600` in `~/Library/Application Support/pi-voice/speaker.json`;
+enrollment audio lives only in memory and is never written to disk. Delete
+  with `/voice speaker forget`.
 
 ## iPhone as mic, barge-in
 
@@ -133,3 +199,5 @@ Then inside Pi:
    say "hey pi" → speech stops (barge-in).
 5. `/voice off` → `voice off`, mic process gone (`pgrep ffmpeg` empty).
 6. Restart Pi with autostart on → listening resumes without downloading.
+7. `/voice setup` → builds the voice-isolation helper (needs Xcode command line tools) and provisions the speaker model, reporting each result.
+8. `/voice enroll` → reads back 5 phrases, then reports scores and the threshold; `/voice test speaker` → score vs threshold, nothing submitted.

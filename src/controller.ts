@@ -10,12 +10,15 @@
 
 import { spawn } from "node:child_process";
 import type { AudioSink, AudioSource, VoiceFailure, VoicePhase, VoicePreferences } from "./contracts.ts";
+import { speakerThresholdFor } from "./contracts.ts";
+import { VoiceIoError } from "./voice-io.ts";
 import { parseTranscriptIntent } from "./intent.ts";
 import { analyzePcm, LevelMeter, meterBar } from "./level.ts";
 import { MicError } from "./mic.ts";
 import { createSpeechChunker, type SpeechChunker } from "./speech-text.ts";
+import { resolveTtsModelId, resolveTtsVoiceId, ttsProviderOf } from "./preferences.ts";
 import type { SttEndInfo, SttHandlers, Utterance } from "./stt.ts";
-import { startSpeech, DEFAULT_TTS_MODEL, type Speech } from "./tts.ts";
+import { DEFAULT_TTS_MODEL, type Speech } from "./tts.ts";
 import type { Endpointer, EndpointerEvents } from "./vad.ts";
 import type { WakeDetector, WakeGroup } from "./wake.ts";
 
@@ -34,6 +37,8 @@ export type VoiceHost = {
 export type ControllerDeps = {
   getPrefs: () => VoicePreferences;
   getKey: () => string | undefined;
+  /** Active-provider TTS key override; falls back to getKey() when absent (legacy single-key harnesses). */
+  getTtsKey?: () => string | undefined;
   isModelProvisioned: () => Promise<boolean>;
   ensureModel: (signal: AbortSignal) => Promise<{ encoder: string; decoder: string; joiner: string; tokens: string; keywordsFile: string }>;
   createSource: (mic: VoicePreferences["mic"], onNotice: (msg: string) => void) => AudioSource;
@@ -47,6 +52,20 @@ export type ControllerDeps = {
   openUtterance: (key: string, handlers: SttHandlers) => Utterance;
   ensureVadModel: (signal: AbortSignal) => Promise<string>;
   createEndpointer: (modelPath: string, events: EndpointerEvents) => Endpointer;
+  /** Owner-voice gate. All optional; when absent (or check off / no profile) capture behaves as before. */
+  getSpeakerCheck?: () => VoicePreferences["speakerCheck"];
+  getSpeakerProfile?: () => { centroid: ArrayLike<number>; suggestedThreshold: number } | undefined;
+  getSpeakerEmbed?: () => ((pcm: Buffer) => { length: number; [index: number]: number }) | undefined;
+  createSpeakerGate?: (opts: {
+    embed: (pcm: Buffer) => { length: number; [index: number]: number };
+    profile: { centroid: ArrayLike<number>; suggestedThreshold: number };
+    threshold: number;
+  }) => {
+    push(pcm: Buffer): void;
+    decision(): "accept" | "reject" | "pending";
+    finalize(): { decision: "accept" | "reject" | "insufficient"; score?: number; speechMs: number };
+    reset(): void;
+  };
   log?: (event: string, data?: Record<string, unknown>) => void;
   playErrorCue?: () => void;
   noSpeechMs?: number;
@@ -127,6 +146,12 @@ export class VoiceController {
   private endpointer: Endpointer | null = null;
   private vadPath: string | null = null;
   private speechHeard = false;
+  private speakerGate: {
+    push(pcm: Buffer): void;
+    decision(): "accept" | "reject" | "pending";
+    finalize(): { decision: "accept" | "reject" | "insufficient"; score?: number; speechMs: number };
+    reset(): void;
+  } | null = null;
   private lastPartial = "";
   private meter = new LevelMeter();
   private lastStatusAt = 0;
@@ -331,7 +356,10 @@ export class VoiceController {
   private onSourceError(err: Error): void {
     const gen = this.generation;
     if (this.closed || gen !== this.generation) return;
-    if (err instanceof MicError && err.code === "permission") {
+    if (
+      (err instanceof MicError && err.code === "permission") ||
+      (err instanceof VoiceIoError && err.code === "permission")
+    ) {
       this.log("mic-error", { code: err.code });
       void (async (): Promise<void> => {
         if (this.closed || gen !== this.generation) return;
@@ -426,6 +454,13 @@ export class VoiceController {
       } catch {
         // Ignore push errors; STT failure paths report on their own.
       }
+      if (this.speakerGate && this.speechHeard) {
+        this.speakerGate.push(chunk);
+        if (this.speakerGate.decision() === "reject") {
+          this.rejectSpeakerUtterance(undefined, 0, "mid");
+          return;
+        }
+      }
       try {
         this.endpointer?.push(chunk);
       } catch {
@@ -503,6 +538,7 @@ export class VoiceController {
     this.submitted = false;
     this.committed = false;
     this.speechHeard = false;
+    this.maybeArmSpeakerGate();
     this.lastPartial = "";
     this.meter.reset();
     this.detector?.reset();
@@ -534,6 +570,24 @@ export class VoiceController {
     this.submitDraft();
   }
 
+  /** If the speaker gate is still pending, finalize it. Returns false when the utterance was rejected. */
+  private settleSpeakerGate(when: "end"): boolean {
+    const gate = this.speakerGate;
+    if (!gate || this.submitted) return true;
+    if (gate.decision() === "reject") {
+      this.rejectSpeakerUtterance(undefined, 0, when);
+      return false;
+    }
+    const result = gate.finalize();
+    if (result.decision === "reject") {
+      this.rejectSpeakerUtterance(result.score, result.speechMs, when);
+      return false;
+    }
+    this.log("speaker", { decision: result.decision, score: result.score, speechMs: result.speechMs, when });
+    this.speakerGate = null;
+    return true;
+  }
+
   private openEndpointer(gen: number): void {
     this.closeEndpointer();
     if (!this.vadPath || typeof this.deps.createEndpointer !== "function") return;
@@ -548,6 +602,7 @@ export class VoiceController {
         onSpeechEnd: (atSec) => {
           if (this.closed || gen !== this.generation || this.phase !== "capture") return;
           this.log("vad-end", { atSec });
+          if (!this.settleSpeakerGate("end")) return;
           try {
             this.utterance?.commit();
           } catch {
@@ -598,6 +653,36 @@ export class VoiceController {
     } catch {
       // Editor sync is best-effort.
     }
+  }
+
+  private maybeArmSpeakerGate(): void {
+    this.speakerGate = null;
+    try {
+      if ((this.deps.getSpeakerCheck?.() ?? "off") === "off") return;
+      const profile = this.deps.getSpeakerProfile?.();
+      const embed = this.deps.getSpeakerEmbed?.();
+      if (!profile || !embed || !this.deps.createSpeakerGate) return;
+      const threshold = speakerThresholdFor(profile.suggestedThreshold, this.deps.getSpeakerCheck?.() ?? "normal");
+      this.speakerGate = this.deps.createSpeakerGate({ embed, profile, threshold });
+    } catch {
+      this.speakerGate = null;
+    }
+  }
+
+  /** Cancel the in-flight utterance as a non-owner voice: nothing submitted, cue, transient notice. */
+  private rejectSpeakerUtterance(score: number | undefined, speechMs: number, when: "mid" | "end"): void {
+    this.log("speaker", { decision: "reject", score, speechMs, when });
+    this.submitted = true;
+    this.clearNoSpeechTimer();
+    this.closeUtterance();
+    this.closeEndpointer();
+    this.playErrorCue();
+    if (this.closed) return;
+    const gen = this.generation;
+    this.setPhase("wake", "\uD83C\uDF99 not your voice");
+    this.later(() => {
+      if (!this.closed && gen === this.generation && this.phase === "wake") this.host.setStatus("\uD83C\uDF99 listening");
+    }, TRANSIENT_STATUS_MS);
   }
 
   private closeUtterance(): void {
@@ -779,7 +864,16 @@ export class VoiceController {
 
   private ttsActive(): boolean {
     const prefs = this.deps.getPrefs();
-    return prefs.tts && this.deps.getKey() !== undefined && (prefs.voiceId ?? "") !== "";
+    if (!prefs.tts || this.ttsKey() === undefined) return false;
+    // Inworld always has an effective voice (default applies); ElevenLabs needs a selection.
+    if (ttsProviderOf(prefs) === "inworld") return true;
+    return (prefs.voiceId ?? "") !== "";
+  }
+
+  /** API key for the active TTS provider. STT always uses getKey() (ElevenLabs). */
+  private ttsKey(): string | undefined {
+    if (this.deps.getTtsKey) return this.deps.getTtsKey();
+    return this.deps.getKey();
   }
 
   /** Stream an assistant text delta into speech. Only text_delta qualifies. */
@@ -814,8 +908,8 @@ export class VoiceController {
       const prefs = this.deps.getPrefs();
       this.log("tts-skipped", {
         ttsOn: prefs.tts,
-        hasVoice: (prefs.voiceId ?? "") !== "",
-        hasCredential: this.deps.getKey() !== undefined,
+        hasVoice: resolveTtsVoiceId(prefs) !== undefined && resolveTtsVoiceId(prefs) !== "",
+        hasCredential: this.ttsKey() !== undefined,
       });
     }
     const stop = message.stopReason;
@@ -973,8 +1067,9 @@ export class VoiceController {
   /** Open socket + chunker for the head entry and replay its buffered deltas. */
   private startQueued(entry: QueuedSpeech): void {
     const prefs = this.deps.getPrefs();
-    const key = this.deps.getKey();
-    if (!key || !prefs.voiceId) {
+    const key = this.ttsKey();
+    const voiceId = resolveTtsVoiceId(prefs);
+    if (!key || !voiceId) {
       this.speechQueue.splice(this.speechQueue.indexOf(entry), 1);
       return;
     }
@@ -990,11 +1085,11 @@ export class VoiceController {
     });
     this.chunker = chunker;
     entry.chunker = chunker;
-    const modelId = prefs.ttsModel && prefs.ttsModel.length > 0 ? prefs.ttsModel : DEFAULT_TTS_MODEL;
+    const modelId = resolveTtsModelId(prefs);
     try {
       entry.speech = this.deps.openSpeech({
         key,
-        voiceId: prefs.voiceId,
+        voiceId,
         modelId,
         onDone: () => this.onSpeechDone(gen, entry),
         onFailure: (f) => this.onSpeechFailure(f, gen, entry),

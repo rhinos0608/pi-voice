@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { createAvFoundationSource, listMicrophones, MicError, parseMicrophoneList } from "../src/mic.ts";
+import { createAvFoundationSource, listMicrophones, MicError, parseMicrophoneList, withSessionFallback } from "../src/mic.ts";
 
 const LISTING = `[AVFoundation indev @ 0x123] AVFoundation video devices:
 [AVFoundation indev @ 0x123] [0] FaceTime HD Camera
@@ -359,4 +359,91 @@ test("exit permission denial reports MicError permission", async () => {
   assert.ok(seen instanceof MicError);
   assert.equal((seen as MicError).code, "permission");
   await src.stop();
+});
+
+function fakeFallbackSource(failWith?: Error): {
+  source: import("../src/contracts.ts").AudioSource;
+  starts: number;
+  stops: number;
+} {
+  let starts = 0;
+  let stops = 0;
+  return {
+    get starts(): number {
+      return starts;
+    },
+    get stops(): number {
+      return stops;
+    },
+    source: {
+      start: async (): Promise<void> => {
+        starts++;
+        if (failWith) throw failWith;
+      },
+      stop: async (): Promise<void> => {
+        stops++;
+      },
+    },
+  };
+}
+
+test("withSessionFallback uses the primary when it starts", async () => {
+  const primary = fakeFallbackSource();
+  const fallback = fakeFallbackSource();
+  let notices = 0;
+  const src = withSessionFallback({
+    primary: primary.source,
+    createFallback: () => fallback.source,
+    shouldFallback: () => true,
+    onFallback: () => {
+      notices++;
+    },
+  });
+  await src.start(() => {}, () => {});
+  await src.stop();
+  assert.equal(primary.starts, 1);
+  assert.equal(primary.stops, 1);
+  assert.equal(fallback.starts, 0);
+  assert.equal(notices, 0);
+});
+
+test("withSessionFallback swaps to the fallback once on a matching start failure", async () => {
+  const primary = fakeFallbackSource(new Error("helper device gone"));
+  const fallback = fakeFallbackSource();
+  let notices = 0;
+  const src = withSessionFallback({
+    primary: primary.source,
+    createFallback: () => fallback.source,
+    shouldFallback: (err) => (err as Error).message.includes("device"),
+    onFallback: () => {
+      notices++;
+    },
+  });
+  await src.start(() => {}, () => {});
+  assert.equal(primary.starts, 1);
+  assert.equal(fallback.starts, 1);
+  assert.equal(notices, 1);
+  await src.stop();
+  await src.start(() => {}, () => {});
+  assert.equal(primary.starts, 1);
+  assert.equal(fallback.starts, 2);
+  assert.equal(fallback.stops, 1);
+  assert.equal(notices, 1);
+});
+
+test("withSessionFallback propagates non-matching errors without swapping", async () => {
+  const primary = fakeFallbackSource(new Error("permission denied"));
+  const fallback = fakeFallbackSource();
+  let notices = 0;
+  const src = withSessionFallback({
+    primary: primary.source,
+    createFallback: () => fallback.source,
+    shouldFallback: (err) => (err as Error).message.includes("device"),
+    onFallback: () => {
+      notices++;
+    },
+  });
+  await assert.rejects(() => src.start(() => {}, () => {}), /permission denied/);
+  assert.equal(fallback.starts, 0);
+  assert.equal(notices, 0);
 });

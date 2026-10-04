@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { statSync } from "node:fs";
 import { chmod, copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -240,6 +241,36 @@ export const VAD_MODEL_BYTES = 643854;
 export const MAX_VAD_BYTES = 2 * 1024 * 1024;
 export const VAD_MODEL_NAME = "silero_vad.onnx";
 
+export const SPEAKER_MODEL_URL =
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
+// Pinned 2026-10-04: downloaded the released onnx and ran `shasum -a 256`.
+// No upstream digest exists (GitHub release API exposes digest:null).
+export const SPEAKER_MODEL_SHA256 = "357a834f702b80161e5b981182c038e18553c1f2ca752ed6cec2052365d4129b";
+export const SPEAKER_MODEL_BYTES = 29596978;
+/** Rejects oversized downloads; the model is ~29.6 MiB. */
+export const MAX_SPEAKER_BYTES = 64 * 1024 * 1024;
+export const SPEAKER_MODEL_NAME = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
+
+/** Cache path for the single-file 3D-Speaker CAM++ model (same root the other models use). */
+export function speakerModelPath(cacheRoot?: string): string {
+  return join(cacheRoot ?? defaultCacheRoot(), SPEAKER_MODEL_NAME);
+}
+
+/**
+ * Sync cached-path probe: returns the speaker model path when a
+ * size-valid copy is already on disk, else undefined. Size-only (no
+ * hash) so enrollment checks stay cheap; ensureSpeakerModel verifies.
+ */
+export function speakerModelCachedPath(cacheRoot?: string): string | undefined {
+  const dest = speakerModelPath(cacheRoot);
+  try {
+    if (statSync(dest).size === SPEAKER_MODEL_BYTES) return dest;
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Cache path for the single-file Silero VAD model (same root the wake model uses). */
 export function vadModelPath(cacheRoot?: string): string {
   return join(cacheRoot ?? defaultCacheRoot(), VAD_MODEL_NAME);
@@ -318,6 +349,72 @@ export async function ensureVadModel(signal: AbortSignal, deps?: ModelDeps): Pro
 async function mkTempDir(): Promise<string> {
   const { mkdtemp } = await import("node:fs/promises");
   return mkdtemp(join(tmpdir(), "pi-voice-model-"));
+}
+
+/** True when the cache holds a size- and hash-valid copy of the speaker model. */
+export async function isSpeakerModelProvisioned(cacheRoot?: string): Promise<boolean> {
+  const dest = speakerModelPath(cacheRoot);
+  try {
+    if ((await stat(dest)).size !== SPEAKER_MODEL_BYTES) return false;
+    return (await hashFile(dest)) === SPEAKER_MODEL_SHA256;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Provision the 3D-Speaker CAM++ model into the cache. Mirrors
+ * ensureVadModel exactly: idempotent on a hash-valid copy, streamed
+ * single-file download with a size cap, sha256 verification, temp file
+ * + atomic rename, cleanup on failure, abort honored throughout.
+ */
+export async function ensureSpeakerModel(signal: AbortSignal, deps?: ModelDeps): Promise<string> {
+  const cacheRoot = deps?.cacheRoot ?? defaultCacheRoot();
+  const dest = speakerModelPath(cacheRoot);
+  const expected = deps?.expectedSha256 ?? SPEAKER_MODEL_SHA256;
+  try {
+    const size = (await stat(dest)).size;
+    const sizeOk = deps?.expectedSha256 !== undefined || size === SPEAKER_MODEL_BYTES;
+    if (sizeOk && (await hashFile(dest)) === expected) return dest;
+  } catch {
+    // Missing or invalid; download below.
+  }
+
+  const fetchImpl = deps?.fetchImpl ?? defaultFetch;
+  const maxBytes = deps?.maxBytes ?? MAX_SPEAKER_BYTES;
+  const tmpBase = await mkTempDir();
+  try {
+    if (signal.aborted) throw new Error("Speaker model provisioning aborted.");
+    const res = await fetchImpl(SPEAKER_MODEL_URL, signal);
+    const hash = createHash("sha256");
+    let bytes = 0;
+    const chunks: Buffer[] = [];
+    for await (const chunk of res.body) {
+      if (signal.aborted) throw new Error("Speaker model provisioning aborted.");
+      bytes += chunk.length;
+      if (bytes > maxBytes) throw new Error(`Speaker model exceeds ${maxBytes} byte cap; aborting.`);
+      hash.update(chunk);
+      chunks.push(Buffer.from(chunk));
+    }
+    const digest = hash.digest("hex");
+    if (digest !== expected) throw new Error(`Speaker model checksum mismatch: got ${digest}; refusing to install.`);
+    if (bytes !== SPEAKER_MODEL_BYTES && deps?.expectedSha256 === undefined) {
+      throw new Error(`Speaker model size mismatch: got ${bytes} bytes, want ${SPEAKER_MODEL_BYTES}.`);
+    }
+    const tmp = join(tmpBase, SPEAKER_MODEL_NAME);
+    if (signal.aborted) throw new Error("Speaker model provisioning aborted.");
+    await writeFile(tmp, Buffer.concat(chunks));
+    await mkdir(dirname(dest), { recursive: true });
+    if (signal.aborted) {
+      await rm(tmp, { force: true }).catch(() => undefined);
+      throw new Error("Speaker model provisioning aborted.");
+    }
+    const renameImpl = deps?.renameImpl ?? rename;
+    await renameImpl(tmp, dest);
+    return dest;
+  } finally {
+    await rm(tmpBase, { recursive: true, force: true });
+  }
 }
 
 // Re-export for tests that stub module-level tar errors.
