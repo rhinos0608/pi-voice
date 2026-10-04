@@ -478,7 +478,7 @@ describe("voice-io live helper (real binary)", () => {
   // Digital silence only; never audible sound.
   const live = process.platform === "darwin";
 
-  type LiveEvent = { event?: string; code?: string; message?: string };
+  type LiveEvent = { event?: string; code?: string; message?: string; duckingLevel?: number; advancedDucking?: boolean };
   type LiveResult = {
     code: number | null;
     signal: NodeJS.Signals | null;
@@ -595,6 +595,13 @@ describe("voice-io live helper (real binary)", () => {
     const engineError = r.events.some((e) => e.event === "error" && e.code === "engine");
     assert.ok(ready || engineError, `expected ready or an engine error event, got: ${JSON.stringify(r.events)}`);
     if (ready) assert.ok(r.stdoutBytes > 0, "expected capture bytes on stdout");
+    // Without voice processing the ducking configuration is never applied,
+    // so the ready event must not report ducking fields.
+    const readyOff = r.events.find((e) => e.event === "ready");
+    if (readyOff !== undefined) {
+      assert.equal(readyOff.duckingLevel, undefined, `unexpected duckingLevel without voice processing: ${JSON.stringify(readyOff)}`);
+      assert.equal(readyOff.advancedDucking, undefined, `unexpected advancedDucking without voice processing: ${JSON.stringify(readyOff)}`);
+    }
   });
 
   it("drains one second of digital silence with voice processing on", { skip: !live, timeout: 55000 }, async (t) => {
@@ -615,6 +622,20 @@ describe("voice-io live helper (real binary)", () => {
     );
     assert.equal(r.signal, null, `helper killed by signal ${r.signal ?? "unknown"}: ${r.stderr.slice(-500)}`);
     assert.equal(r.code, 0, `helper exit code ${r.code ?? "unknown"}: ${r.stderr.slice(-500)}`);
+  });
+
+  it("reports min other-audio ducking with voice processing on", { skip: !live, timeout: 55000 }, async (t) => {
+    const bin = await liveBinary(t);
+    if (bin === undefined) return;
+    const r = await runHelper(bin, ["--voice-processing", "on"], 2500);
+    if (skipWhenNoMic(t, r)) return;
+    const ready = r.events.find((e) => e.event === "ready");
+    assert.ok(ready, `expected a ready event, got: ${JSON.stringify(r.events)}`);
+    // 10 is AVAudioVoiceProcessingOtherAudioDuckingLevelMin; advanced
+    // ducking stays off so the helper never turns down the owner's audio.
+    assert.equal(ready?.duckingLevel, 10, `duckingLevel not min: ${JSON.stringify(ready)}`);
+    assert.equal(ready?.advancedDucking, false, `advancedDucking not off: ${JSON.stringify(ready)}`);
+    assert.equal(r.signal, null, `helper killed by signal ${r.signal ?? "unknown"}: ${r.stderr.slice(-500)}`);
   });
 });
 

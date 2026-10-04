@@ -15,7 +15,10 @@
 // Types: 0x01 PLAY, 0x02 FINISH, 0x03 STOP, 0x04 QUIT. EOF on stdin = QUIT.
 //
 // Events: JSON lines on file descriptor 3:
-//   {"event":"ready","inputSampleRate":N,"voiceProcessing":bool}
+//   {"event":"ready","inputSampleRate":N,"voiceProcessing":bool,
+//    "duckingLevel":N,"advancedDucking":bool}
+//    (ducking keys: macOS 14+ with --voice-processing on only; they report
+//    the applied configuration, so they are absent otherwise)
 //   {"event":"drained"} {"event":"stopped"}
 //   {"event":"error","code":"permission"|"device"|"engine","message":S}
 //   {"event":"playback-error","code":"playback","message":S}
@@ -287,10 +290,18 @@ final class VoiceIo {
         if let name = deviceName {
             applyDevice(named: name)
         }
-        if #available(macOS 13.0, *) {
-            var duck = input.voiceProcessingOtherAudioDuckingConfiguration
-            duck.enableAdvancedDucking = false
-            duck.duckingLevel = .min
+        // Ducking must be configured after setVoiceProcessingEnabled(true)
+        // swaps in the VoiceProcessingIO unit, and before prepare/start.
+        // The property is a struct value type: mutate a copy and assign it
+        // back, or the write is lost and default ducking stays in effect.
+        // macOS 14+ per AVAudioIONode.h; older systems keep Apple defaults.
+        if voiceProcessing {
+            if #available(macOS 14.0, *) {
+                var duck = input.voiceProcessingOtherAudioDuckingConfiguration
+                duck.enableAdvancedDucking = false
+                duck.duckingLevel = .min
+                input.voiceProcessingOtherAudioDuckingConfiguration = duck
+            }
         }
 
         let hwFormat = input.outputFormat(forBus: 0)
@@ -342,7 +353,24 @@ final class VoiceIo {
         // is not ready the instant the engine starts, and that must never
         // fail capture. Playback problems surface as playback-error
         // events to PLAY/FINISH waiters only.
-        events.emit(["event": "ready", "inputSampleRate": Int(kCaptureSampleRate), "voiceProcessing": voiceProcessing])
+        // Read the ducking configuration back so the applied values are
+        // observable on the event channel. duckingLevel/advancedDucking
+        // are present only where the property exists (macOS 14+) AND voice
+        // processing is enabled: below macOS 14, or with --voice-processing
+        // off, the configuration above is never applied, so reporting it
+        // would describe state that was never set.
+        // level 10 is AVAudioVoiceProcessingOtherAudioDuckingLevelMin.
+        var readyEvent: [String: Any] = [
+            "event": "ready", "inputSampleRate": Int(kCaptureSampleRate), "voiceProcessing": voiceProcessing,
+        ]
+        if voiceProcessing {
+            if #available(macOS 14.0, *) {
+                let applied = input.voiceProcessingOtherAudioDuckingConfiguration
+                readyEvent["duckingLevel"] = applied.duckingLevel.rawValue
+                readyEvent["advancedDucking"] = applied.enableAdvancedDucking.boolValue
+            }
+        }
+        events.emit(readyEvent)
         audioQueue.async { [weak self] in
             self?.setupPlayback()
         }
