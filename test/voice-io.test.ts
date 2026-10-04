@@ -334,6 +334,64 @@ describe("voice-io sink", () => {
     await h.close();
   });
 
+  it("a playback-error fails a pending finish but keeps the source alive", async () => {
+    const { children, spawnImpl } = makeSpawn();
+    const h = createVoiceIo({ helperPath: "/bin/voice-io", spawnImpl });
+    const errors: (Error & { code?: string })[] = [];
+    const got: Buffer[] = [];
+    const started = h.source.start(
+      (c) => got.push(c),
+      (e) => errors.push(e as Error & { code?: string }),
+    );
+    emitReady(children[0] as FakeChild);
+    await started;
+    const sink = h.createSink();
+    await sink.start({ sampleRate: 24000, channels: 1, encoding: "s16le" });
+    await sink.write(Buffer.from([1, 2, 3, 4]));
+    const finishing = sink.finish();
+    emitEvent(children[0] as FakeChild, { event: "playback-error", code: "playback", message: "no output" });
+    await assert.rejects(finishing, (err: Error & { code?: string }) => {
+      assert.equal((err as { code?: string }).code, "engine");
+      return true;
+    });
+    // Capture is untouched: no source error, PCM still flows, and a
+    // retried finish can still resolve on drained.
+    assert.equal(errors.length, 0);
+    (children[0] as FakeChild).stdout.emit("data", Buffer.from([5, 6]));
+    assert.deepEqual(got, [Buffer.from([5, 6])]);
+    const retry = sink.finish();
+    emitEvent(children[0] as FakeChild, { event: "drained" });
+    await retry;
+    const stopping = sink.stop();
+    emitEvent(children[0] as FakeChild, { event: "stopped" });
+    await stopping;
+    await h.source.stop();
+    await h.close();
+  });
+
+  it("an error event with code playback stays sink-local", async () => {
+    const { children, spawnImpl } = makeSpawn();
+    const h = createVoiceIo({ helperPath: "/bin/voice-io", spawnImpl });
+    const errors: (Error & { code?: string })[] = [];
+    const started = h.source.start(
+      () => {},
+      (e) => errors.push(e as Error & { code?: string }),
+    );
+    emitReady(children[0] as FakeChild);
+    await started;
+    const sink = h.createSink();
+    await sink.start({ sampleRate: 24000, channels: 1, encoding: "s16le" });
+    const finishing = sink.finish();
+    emitEvent(children[0] as FakeChild, { event: "error", code: "playback", message: "no output" });
+    await assert.rejects(finishing);
+    assert.equal(errors.length, 0);
+    const stopping = sink.stop();
+    emitEvent(children[0] as FakeChild, { event: "stopped" });
+    await stopping;
+    await h.source.stop();
+    await h.close();
+  });
+
   it("rejects non-24kHz formats", async () => {
     const { spawnImpl } = makeSpawn();
     const h = createVoiceIo({ helperPath: "/bin/voice-io", spawnImpl });

@@ -18,6 +18,9 @@
 //   {"event":"ready","inputSampleRate":N,"voiceProcessing":bool}
 //   {"event":"drained"} {"event":"stopped"}
 //   {"event":"error","code":"permission"|"device"|"engine","message":S}
+//   {"event":"playback-error","code":"playback","message":S}
+//     Playback-only failure: capture keeps running. The host reports it
+//     to sink waiters (PLAY/FINISH) without touching the live source.
 //   {"event":"route-change"}
 //
 // Compile: xcrun swiftc -O -o voice-io native/voice-io.swift
@@ -326,17 +329,6 @@ final class VoiceIo {
                 emitError(code: "engine", message: msg)
             }
         }
-        audioQueue.sync {
-            engine.connect(player, to: engine.mainMixerNode, format: nil)
-            playerFormat = player.outputFormat(forBus: 0)
-            guard safePlay() else {
-                emitError(
-                    code: "engine",
-                    message:
-                        "Playback unavailable: player has no output connection (engineRunning: \(engine.isRunning), connections: \(connectionCount())). Check the output device."
-                )
-            }
-        }
 
         NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
@@ -344,7 +336,48 @@ final class VoiceIo {
             self?.handleRouteChange()
         }
 
+        // Capture is live once the engine runs with the tap installed, so
+        // report ready immediately. The player is set up lazily and
+        // asynchronously below: on some machines the output connection
+        // is not ready the instant the engine starts, and that must never
+        // fail capture. Playback problems surface as playback-error
+        // events to PLAY/FINISH waiters only.
         events.emit(["event": "ready", "inputSampleRate": Int(kCaptureSampleRate), "voiceProcessing": voiceProcessing])
+        audioQueue.async { [weak self] in
+            self?.setupPlayback()
+        }
+    }
+
+    /// Bring the player online without blocking capture. Retries on a
+    /// short delay because the output connection may not be ready the
+    /// instant the engine starts, and again after configuration changes.
+    /// Gives up silently: PLAY/FINISH report playback-error on demand.
+    /// Must run on audioQueue.
+    private func setupPlayback(attempt: Int = 0) {
+        if ensurePlayerConnection() {
+            playerFormat = player.outputFormat(forBus: 0)
+            if safePlay() { return }
+        }
+        guard attempt < 20 else {
+            fputs("voice-io: playback unavailable; capture continues\n", stderr)
+            return
+        }
+        audioQueue.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self else { return }
+            // The engine can still be settling after start; nudge it back
+            // without touching the capture tap.
+            if !self.engine.isRunning { try? self.engine.start() }
+            self.setupPlayback(attempt: attempt + 1)
+        }
+    }
+
+    /// Playback-only failure report. Never fatal: capture keeps running.
+    private func emitPlaybackError() {
+        events.emit([
+            "event": "playback-error", "code": "playback",
+            "message":
+                "Playback unavailable: player has no output connection (engineRunning: \(engine.isRunning), connections: \(connectionCount())). Capture continues; check the output device.",
+        ])
     }
 
     private func handleTap(buffer: AVAudioPCMBuffer) {
@@ -511,16 +544,22 @@ final class VoiceIo {
         guard !data.isEmpty else { return }
         let scheduled: Bool = audioQueue.sync {
             guard ensurePlayerConnection(), safePlay() else {
-                events.emit([
-                    "event": "error", "code": "engine",
-                    "message":
-                        "Playback unavailable: player has no output connection (engineRunning: \(engine.isRunning), connections: \(connectionCount())). Check the output device.",
-                ])
+                emitPlaybackError()
                 return false
             }
-            return scheduleLocked(data)
+            guard scheduleLocked(data) else {
+                emitPlaybackError()
+                return false
+            }
+            return true
         }
-        _ = scheduled
+        if !scheduled {
+            // The engine may still have been settling; retry the player
+            // connection in the background. Capture keeps running.
+            audioQueue.async { [weak self] in
+                self?.setupPlayback()
+            }
+        }
     }
 
     /// Convert 24 kHz mono s16le to the player format and schedule it.
@@ -582,8 +621,20 @@ final class VoiceIo {
         let empty = pendingBuffers <= 0
         if !empty { finishPending = true }
         state.unlock()
-        if empty {
+        if !empty { return }
+        // Nothing queued: only claim drained when playback is actually
+        // up. Otherwise fail this FINISH with a playback-only error so
+        // the sink caller sees it, while capture keeps running.
+        let ready: Bool = audioQueue.sync {
+            ensurePlayerConnection() && playerFormat != nil
+        }
+        if ready {
             events.emit(["event": "drained"])
+        } else {
+            emitPlaybackError()
+            audioQueue.async { [weak self] in
+                self?.setupPlayback()
+            }
         }
     }
 

@@ -381,7 +381,20 @@ export function createVoiceIo(opts: CreateVoiceIoOpts): VoiceIoHandle {
       case "route-change":
         log?.("route-change");
         break;
+      case "playback-error":
+        // Playback-only failure: capture keeps running. Fail pending
+        // sink operations (PLAY/FINISH) without touching the live
+        // source or the ready state. Code stays "engine" so existing
+        // fallback handling keeps working.
+        failPendingSinkOps(new VoiceIoError("engine", msg.message ?? "voice-io playback unavailable"));
+        log?.("playback-error", { message: msg.message });
+        break;
       case "error": {
+        if (msg.code === "playback") {
+          failPendingSinkOps(new VoiceIoError("engine", msg.message ?? "voice-io playback unavailable"));
+          log?.("playback-error", { message: msg.message });
+          break;
+        }
         const code = (msg.code === "permission" || msg.code === "device" || msg.code === "engine"
           ? msg.code
           : "engine") as VoiceIoErrorCode;
