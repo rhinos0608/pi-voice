@@ -284,4 +284,34 @@ describe("preferences", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("speakerLearn defaults on and legacy files load unchanged", async () => {
+    assert.equal(DEFAULT_PREFERENCES.speakerLearn, true);
+    const dir = freshDir();
+    try {
+      const { writeFileSync } = await import("node:fs");
+      writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, wake: "hey-pi" }));
+      const legacy = await loadPreferences(dir);
+      assert.equal(legacy.prefs.speakerLearn, true);
+      assert.equal(legacy.warning, undefined);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("speakerLearn round-trips and rejects invalid values", async () => {
+    const dir = freshDir();
+    try {
+      const { writeFileSync } = await import("node:fs");
+      await savePreferences({ ...DEFAULT_PREFERENCES, speakerLearn: false }, dir);
+      const reloaded = await loadPreferences(dir);
+      assert.equal(reloaded.prefs.speakerLearn, false);
+      assert.equal(reloaded.warning, undefined);
+      writeFileSync(join(dir, "state.json"), JSON.stringify({ version: 1, speakerLearn: "yes" }));
+      const invalid = await loadPreferences(dir);
+      assert.equal(invalid.prefs.speakerLearn, true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

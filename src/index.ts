@@ -455,6 +455,10 @@ export default function voiceExtension(pi: ExtensionAPI): void {
     getSpeakerProfile: () => speakerProfile,
     getSpeakerEmbed: () => ensureSpeakerEmbedder(),
     createSpeakerGate: (opts) => createSpeakerGate(opts as unknown as Parameters<typeof createSpeakerGate>[0]),
+    setSpeakerProfile: (profile) => {
+      speakerProfile = profile;
+    },
+    saveSpeakerProfile: (profile) => saveSpeakerProfile(profile),
     ...(debug.enabled ? { log: (event: string, data?: Record<string, unknown>) => debug.log(event, data) } : {}),
   });
 
@@ -535,6 +539,9 @@ export default function voiceExtension(pi: ExtensionAPI): void {
       };
       await refreshSpeakerState();
       await handleVoiceCommand(args, ctxView, buildEnv(cmdCtx));
+      // Flush debounced learning before reloading, so a that-was-me or
+      // reset-learning in this command sees the latest profile, not a stale disk copy.
+      await controller.flushSpeakerLearning();
       await refreshSpeakerState();
     },
   });

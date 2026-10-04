@@ -51,6 +51,7 @@ function withDefaults(raw: unknown): VoicePreferences {
       r["speakerCheck"] === "high"
         ? r["speakerCheck"]
         : DEFAULT_PREFERENCES.speakerCheck,
+    speakerLearn: typeof r["speakerLearn"] === "boolean" ? r["speakerLearn"] : DEFAULT_PREFERENCES.speakerLearn,
   };
 }
 

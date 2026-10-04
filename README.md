@@ -97,7 +97,7 @@ Prefer ElevenLabs for speech too? `export ELEVENLABS_API_KEY`, then
 | `/voice autostart on\|off` | Auto-listen at session start when the model is cached and the key is present (default on; never downloads at startup) |
 | `/voice isolation on\|off` | Echo-cancelling helper capture + playback (default on when built). Bare shows state and whether the helper is built |
 | `/voice enroll` | Guided owner-voice enrollment (cancel with `/voice off`; audio never written to disk) |
-| `/voice speaker off\|low\|normal\|high\|forget` | Owner-voice check strictness (default `normal`), or delete the voice profile |
+| `/voice speaker off\|low\|normal\|high\|forget\|learn on\|off\|that-was-me\|reset-learning` | Owner-voice check strictness (default `normal`), delete the voice profile, toggle continuous learning, learn the last rejection as your voice, or clear learned samples |
 | `/voice send auto\|review` | `auto` submits transcripts immediately; `review` stages them in the Pi editor. Bare `/voice send` shows the current mode |
 | `/voice test mic\|wake\|stt\|tts\|speaker` | `mic`: 2 s capture with input level; `wake`: ~10 s offline listen (nothing submitted); `stt`: 8 s live capture reporting commit→transcript latency; `tts`: billable spoken test phrase; `speaker`: one utterance scored vs threshold, nothing submitted |
 | `/voice help` | This summary in-session |
@@ -150,6 +150,24 @@ review mode, nothing lands in the editor either).
   `0600` in `~/Library/Application Support/pi-voice/speaker.json`;
 enrollment audio lives only in memory and is never written to disk. Delete
   with `/voice speaker forget`.
+- **Continuous learning (default on, `/voice speaker learn off` to pause).**
+  After an utterance the gate accepted is actually submitted (auto mode, or
+  review-mode text actually sent — never on cancel, barge-in, STT failure,
+  empty transcripts, or unsent drafts), confident matches refine the profile:
+  only samples clearing the threshold by a margin with enough speech are
+  learned. Enrollment anchors stay fixed and are never evicted, so impostors
+  cannot drag the profile away; learned samples live in a diversity-aware
+  bank (up to 64, one speaking condition capped at a quarter of the bank).
+  Saves are debounced (at most once per 30 s, flushed on voice off /
+  shutdown) and never delay submission. Status shows the bank fill, e.g.
+  `speaker: normal, enrolled 2026-10-04, learned 12/64`.
+- **False reject?** `/voice speaker that-was-me` learns the last rejected
+  utterance as your voice (kept in memory only, for 2 minutes). Samples too
+  different from enrollment are refused. `/voice speaker reset-learning`
+  drops all learned samples back to the enrollment anchors.
+- Learning knobs (accept margin, bank size, condition cap, threshold step)
+  are **provisional** constants in `src/speaker.ts` (`LEARN`): expect them to
+  change once false-accept/false-reject rates are measured on real voice.
 
 ## iPhone as mic, barge-in
 

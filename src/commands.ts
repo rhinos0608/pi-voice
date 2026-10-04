@@ -6,8 +6,7 @@
 
 import type { MicDevice, TtsProvider, VoicePreferences } from "./contracts.ts";
 import { speakerThresholdFor } from "./contracts.ts";
-import { cosineSimilarity, MIN_ENROLL_CLIPS, type SpeakerProfile } from "./speaker.ts";
-import * as speakerConsts from "./speaker.ts";
+import { cosineSimilarity, LEARN, MIN_ENROLL_CLIPS, RECOMMENDED_ENROLL_CLIPS, addCorrection, learnedCount, resetLearning, type SpeakerProfile } from "./speaker.ts";
 import { DEFAULT_TTS_MODEL } from "./tts.ts";
 import { DEFAULT_INWORLD_MODEL, DEFAULT_INWORLD_VOICE, INWORLD_TTS_MODELS } from "./inworld-tts.ts";
 import type { VoiceController } from "./controller.ts";
@@ -24,9 +23,8 @@ export type CommandCtx = {
   setStatus(key: string, text: string | undefined): void;
 };
 
-/** Guided-enrollment prompt count; follows the speaker module's recommendation when present. */
-const RECOMMENDED_ENROLL_CLIPS: number =
-  (speakerConsts as { RECOMMENDED_ENROLL_CLIPS?: number }).RECOMMENDED_ENROLL_CLIPS ?? 5;
+/** Guided-enrollment prompt count, from the speaker module's recommendation. */
+const ENROLL_CLIP_COUNT = RECOMMENDED_ENROLL_CLIPS;
 
 /** Short varied phrases read aloud during enrollment. Never written to disk. */
 const ENROLL_PHRASES: readonly string[] = [
@@ -262,7 +260,17 @@ async function completeArgumentValue(
     case "send":
       return completeValues(["auto", "review"]);
     case "speaker":
-      return completeValues(["off", "low", "normal", "high", "forget"]);
+      return completeValues([
+        "off",
+        "low",
+        "normal",
+        "high",
+        "forget",
+        "learn on",
+        "learn off",
+        "that-was-me",
+        "reset-learning",
+      ]);
     case "provider":
       return completeValues(["inworld", "elevenlabs"]);
     case "test":
@@ -364,12 +372,12 @@ function describeIsolation(env: CommandEnv): string {
 async function describeSpeaker(env: CommandEnv): Promise<string> {
   const prefs = env.getPrefs();
   const sp = env.speaker;
-  if (!sp) return `speaker check: ${prefs.speakerCheck} (unavailable)`;
+  if (!sp) return `speaker: ${prefs.speakerCheck}, learning ${prefs.speakerLearn ?? true ? "on" : "off"} (unavailable)`;
   const profile = await sp.loadProfile().catch(() => undefined);
-  if (!profile) return `speaker check: ${prefs.speakerCheck} (not enrolled — run /voice enroll)`;
+  if (!profile) return `speaker: ${prefs.speakerCheck}, learning ${prefs.speakerLearn ?? true ? "on" : "off"} (not enrolled — run /voice enroll)`;
   const threshold = speakerThresholdFor(profile.suggestedThreshold, prefs.speakerCheck);
   const modelNote = sp.modelCachedPath() ? "" : "; model missing, check is off";
-  return `speaker check: ${prefs.speakerCheck} (enrolled ${profile.enrolledAt}, threshold ${threshold.toFixed(2)}${modelNote})`;
+  return `speaker: ${prefs.speakerCheck}, learning ${prefs.speakerLearn ?? true ? "on" : "off"}, enrolled ${profile.enrolledAt}, learned ${learnedCount(profile)}/${LEARN.maxLearned}, threshold ${threshold.toFixed(2)}${modelNote}`;
 }
 
 async function runSpeakerTest(ctx: CommandCtx, env: CommandEnv): Promise<void> {
@@ -405,6 +413,57 @@ async function runSpeakerTest(ctx: CommandCtx, env: CommandEnv): Promise<void> {
   );
 }
 
+/** Learn the last rejected utterance as the owner's voice (explicit correction). */
+async function runSpeakerCorrection(ctx: CommandCtx, env: CommandEnv): Promise<void> {
+  const sp = env.speaker;
+  if (!sp) {
+    ctx.notify("Speaker corrections are unavailable in this session.", "warning");
+    return;
+  }
+  const ctrl = env.controller as unknown as {
+    getSpeakerCorrectionCandidate?: () => unknown;
+    clearSpeakerCorrectionCandidate?: () => void;
+  };
+  const candidate = ctrl.getSpeakerCorrectionCandidate?.() as Float32Array | undefined;
+  if (!candidate) {
+    ctx.notify("Nothing recent to learn from: no rejected utterance in the last 2 minutes.", "info");
+    return;
+  }
+  const profile = await sp.loadProfile().catch(() => undefined);
+  if (!profile) {
+    ctx.notify("Speaker profile not enrolled — run /voice enroll first.", "warning");
+    return;
+  }
+  const result = addCorrection(profile, candidate);
+  ctrl.clearSpeakerCorrectionCandidate?.();
+  if (!result.adapted) {
+    ctx.notify("That sample is too different from your enrollment — nothing learned.", "warning");
+    return;
+  }
+  await sp.saveProfile(result.profile);
+  ctx.notify(
+    `Learned that sample as your voice (learned ${learnedCount(result.profile)}/${LEARN.maxLearned}).`,
+    "info",
+  );
+}
+
+/** Drop learned samples, keeping the enrollment anchors. */
+async function runSpeakerResetLearning(ctx: CommandCtx, env: CommandEnv): Promise<void> {
+  const sp = env.speaker;
+  if (!sp) {
+    ctx.notify("Speaker check is unavailable in this session.", "warning");
+    return;
+  }
+  const profile = await sp.loadProfile().catch(() => undefined);
+  if (!profile) {
+    ctx.notify("Speaker profile not enrolled — run /voice enroll first.", "warning");
+    return;
+  }
+  const before = learnedCount(profile);
+  await sp.saveProfile(resetLearning(profile));
+  ctx.notify(`Reset learning: cleared ${before} learned sample(s); enrollment anchors kept.`, "info");
+}
+
 async function runEnrollment(ctx: CommandCtx, env: CommandEnv): Promise<void> {
   const sp = env.speaker;
   if (!sp) {
@@ -430,7 +489,7 @@ async function runEnrollment(ctx: CommandCtx, env: CommandEnv): Promise<void> {
       return;
     }
     const embedder = sp.createEmbedder(modelPath);
-    const count = Math.min(RECOMMENDED_ENROLL_CLIPS, ENROLL_PHRASES.length);
+    const count = Math.min(ENROLL_CLIP_COUNT, ENROLL_PHRASES.length);
     const phrases = ENROLL_PHRASES.slice(0, count);
     const embeddings: Float32Array[] = [];
     let index = 0;
@@ -602,7 +661,7 @@ export async function handleVoiceCommand(
           '/voice send auto|review — review: dictation goes to the editor; Enter or "send to pi" submits; "hey pi, send" also works',
           "/voice isolation on|off — echo-cancelling helper capture + playback (bare shows helper state)",
           "/voice enroll — guided owner-voice enrollment (cancellable with /voice off)",
-          "/voice speaker off|low|normal|high|forget — strictness, or delete the voice profile",
+          "/voice speaker off|low|normal|high|forget|learn on|off|that-was-me|reset-learning — strictness, delete the voice profile, toggle learning, learn the last rejection as your voice, or clear learned samples",
           "/voice test mic|wake|tts|stt|speaker — tts is billable; speaker submits nothing",
           "Privacy: post-wake audio goes to ElevenLabs (Scribe); assistant prose goes to Inworld (TTS). Wake detection is local.",
         ].join("\n"),
@@ -845,8 +904,27 @@ export async function handleVoiceCommand(
         ctx.notify("Speaker profile deleted.", "info");
         return;
       }
+      if (value === "learn" || value === "learn on" || value === "learn off") {
+        if (value === "learn") {
+          ctx.notify(`speaker learning: ${env.getPrefs().speakerLearn ?? true ? "on" : "off"}`, "info");
+          return;
+        }
+        const next = await env.mutatePrefs((prefs) => {
+          prefs.speakerLearn = value === "learn on";
+        });
+        ctx.notify(`speaker learning: ${next.speakerLearn ? "on" : "off"}`, "info");
+        return;
+      }
+      if (value === "that-was-me") {
+        await runSpeakerCorrection(ctx, env);
+        return;
+      }
+      if (value === "reset-learning") {
+        await runSpeakerResetLearning(ctx, env);
+        return;
+      }
       if (value !== "off" && value !== "low" && value !== "normal" && value !== "high") {
-        ctx.notify("Usage: /voice speaker off|low|normal|high|forget", "warning");
+        ctx.notify("Usage: /voice speaker off|low|normal|high|forget|learn on|off|that-was-me|reset-learning", "warning");
         return;
       }
       await env.mutatePrefs((prefs) => {

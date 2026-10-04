@@ -4,7 +4,7 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 import type { VoicePreferences } from "../src/contracts.ts";
 import { DEFAULT_PREFERENCES } from "../src/contracts.ts";
-import type { SpeakerProfile } from "../src/speaker.ts";
+import { LEARN, type SpeakerProfile } from "../src/speaker.ts";
 import {
   MISSING_INWORLD_KEY_MESSAGE,
   MISSING_KEY_MESSAGE,
@@ -545,9 +545,13 @@ describe("isolation and speaker commands", () => {
     assert.deepEqual((await getVoiceCompletions("speaker ", env))?.map((h) => h.value).sort(), [
       "speaker forget",
       "speaker high",
+      "speaker learn off",
+      "speaker learn on",
       "speaker low",
       "speaker normal",
       "speaker off",
+      "speaker reset-learning",
+      "speaker that-was-me",
     ]);
     const roots = (await getVoiceCompletions("e", env))?.map((h) => h.value) ?? [];
     assert.ok(roots.includes("enroll"), "missing enroll");
@@ -575,7 +579,7 @@ describe("isolation and speaker commands", () => {
     const bag = makeEnv();
     makeSpokedEnv(bag);
     await handleVoiceCommand("speaker", ctxFor(bag.notified), bag.env);
-    assert.ok(bag.notified.some((n) => /speaker check: normal.*enrolled 2026-01-02/.test(n.message)));
+    assert.ok(bag.notified.some((n) => /speaker: normal, learning on, enrolled 2026-01-02.*learned 0\/64/.test(n.message)));
     await handleVoiceCommand("speaker high", ctxFor(bag.notified), bag.env);
     assert.equal(bag.prefs.speakerCheck, "high");
     await handleVoiceCommand("speaker forget", ctxFor(bag.notified), bag.env);
@@ -583,7 +587,7 @@ describe("isolation and speaker commands", () => {
     await handleVoiceCommand("speaker", ctxFor(bag.notified), bag.env);
     assert.ok(bag.notified.some((n) => /not enrolled/.test(n.message)));
     await handleVoiceCommand("speaker bogus", ctxFor(bag.notified), bag.env);
-    assert.ok(bag.notified.some((n) => n.message === "Usage: /voice speaker off|low|normal|high|forget"));
+    assert.ok(bag.notified.some((n) => n.message === "Usage: /voice speaker off|low|normal|high|forget|learn on|off|that-was-me|reset-learning"));
   });
 
   it("enroll guides five phrases, embeds, saves, and reports scores", async () => {
@@ -676,6 +680,167 @@ describe("isolation and speaker commands", () => {
     await handleVoiceCommand("status", ctxFor(bag.notified), bag.env);
     const text = bag.notified.map((n) => n.message).join("\n");
     assert.ok(text.includes("isolation: on (helper built"));
-    assert.ok(text.includes("speaker check: normal (enrolled 2026-01-02"));
+    assert.ok(text.includes("speaker: normal, learning on, enrolled 2026-01-02"));
+    assert.ok(text.includes(`learned 0/${LEARN.maxLearned}`));
+  });
+});
+
+describe("speaker learning commands", () => {
+  function makeLearningEnv(opts?: {
+    profile?: SpeakerProfile | undefined;
+    candidate?: Float32Array | undefined;
+  }): {
+    bag: ReturnType<typeof makeEnv>;
+    savedProfiles: SpeakerProfile[];
+    cleared: () => number;
+  } {
+    const bag = makeEnv();
+    let profile: SpeakerProfile | undefined =
+      opts && "profile" in opts
+        ? opts.profile
+        : {
+            version: 1,
+            model: "/tmp/speaker.onnx",
+            dim: 2,
+            centroid: [1, 0],
+            enrolledAt: "2026-01-02T00:00:00.000Z",
+            enrollScores: [0.92, 0.88, 0.9, 0.91, 0.89],
+            suggestedThreshold: 0.78,
+            anchors: [[1, 0]],
+            learned: [],
+          };
+    const savedProfiles: SpeakerProfile[] = [];
+    let candidate = opts?.candidate;
+    let clears = 0;
+    Object.assign(bag.env.controller, {
+      getSpeakerCorrectionCandidate: (): Float32Array | undefined => candidate,
+      clearSpeakerCorrectionCandidate: (): void => {
+        candidate = undefined;
+        clears++;
+      },
+    });
+    bag.env.speaker = {
+      loadProfile: async () => profile,
+      saveProfile: async (p) => {
+        savedProfiles.push(p);
+        profile = p;
+      },
+      deleteProfile: async () => {
+        profile = undefined;
+      },
+      ensureModel: async () => "/tmp/speaker.onnx",
+      modelCachedPath: () => "/tmp/speaker.onnx",
+      createEmbedder: () => ({
+        embed: () => new Float32Array([1, 0]),
+      }),
+      buildProfile: (embeddings, model) => ({
+        version: 1 as const,
+        model,
+        dim: 2,
+        centroid: [1, 0],
+        enrolledAt: "2026-01-02T00:00:00.000Z",
+        enrollScores: embeddings.map(() => 0.9),
+        suggestedThreshold: 0.78,
+      }),
+      capturePhrase: async () => ({ status: "ok" as const, pcm: Buffer.from([1, 2, 3, 4]), speechMs: 2000 }),
+    };
+    return { bag, savedProfiles, cleared: () => clears };
+  }
+
+  it("parses speaker learning values", () => {
+    assert.deepEqual(parseVoiceArgs("speaker that-was-me"), { sub: "speaker", value: "that-was-me" });
+    assert.deepEqual(parseVoiceArgs("speaker learn on"), { sub: "speaker", value: "learn on" });
+    assert.deepEqual(parseVoiceArgs("speaker learn off"), { sub: "speaker", value: "learn off" });
+    assert.deepEqual(parseVoiceArgs("speaker reset-learning"), { sub: "speaker", value: "reset-learning" });
+  });
+
+  it("learn toggles the preference and reports it", async () => {
+    const { bag } = makeLearningEnv();
+    assert.equal(bag.prefs.speakerLearn, true);
+    await handleVoiceCommand("speaker learn", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /speaker learning: on/.test(n.message)));
+    await handleVoiceCommand("speaker learn off", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.speakerLearn, false);
+    assert.ok(bag.notified.some((n) => /speaker learning: off/.test(n.message)));
+    await handleVoiceCommand("speaker learn on", ctxFor(bag.notified), bag.env);
+    assert.equal(bag.prefs.speakerLearn, true);
+    await handleVoiceCommand("speaker learn maybe", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /Usage: \/voice speaker/.test(n.message)));
+    assert.equal(bag.prefs.speakerLearn, true);
+  });
+
+  it("that-was-me learns a near rejection and consumes it", async () => {
+    const { bag, savedProfiles } = makeLearningEnv({ candidate: new Float32Array([1, 0]) });
+    await handleVoiceCommand("speaker that-was-me", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /learned/i.test(n.message)), JSON.stringify(bag.notified));
+    assert.equal(savedProfiles.length, 1);
+    assert.equal(savedProfiles[0]?.learned?.length, 1);
+    await handleVoiceCommand("speaker that-was-me", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /nothing recent/i.test(n.message)));
+    assert.equal(savedProfiles.length, 1);
+  });
+
+  it("that-was-me rejects a sample too different from enrollment", async () => {
+    const { bag, savedProfiles } = makeLearningEnv({ candidate: new Float32Array([-1, 0]) });
+    await handleVoiceCommand("speaker that-was-me", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /too different from your enrollment/.test(n.message)));
+    assert.equal(savedProfiles.length, 0);
+  });
+
+  it("that-was-me reports nothing recent without a rejection", async () => {
+    const bag = makeEnv();
+    bag.env.speaker = makeLearningEnv().bag.env.speaker;
+    await handleVoiceCommand("speaker that-was-me", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /nothing recent/i.test(n.message)));
+  });
+
+  it("that-was-me needs an enrolled profile", async () => {
+    const { bag, savedProfiles } = makeLearningEnv({ profile: undefined, candidate: new Float32Array([1, 0]) });
+    await handleVoiceCommand("speaker that-was-me", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /not enrolled/.test(n.message)));
+    assert.equal(savedProfiles.length, 0);
+  });
+
+  it("reset-learning clears the bank and saves", async () => {
+    const { bag, savedProfiles } = makeLearningEnv();
+    bag.env.speaker!.loadProfile = async () => ({
+      version: 1 as const,
+      model: "/tmp/speaker.onnx",
+      dim: 2,
+      centroid: [1, 0],
+      enrolledAt: "2026-01-02T00:00:00.000Z",
+      enrollScores: [0.92, 0.88, 0.9, 0.91, 0.89],
+      suggestedThreshold: 0.78,
+      anchors: [[1, 0]],
+      learned: [{ v: [1, 0], at: "2026-01-03T00:00:00.000Z", score: 0.9 }],
+    });
+    await handleVoiceCommand("speaker reset-learning", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /cleared 1/.test(n.message)), JSON.stringify(bag.notified));
+    assert.equal(savedProfiles.length, 1);
+    assert.deepEqual(savedProfiles[0]?.learned, []);
+  });
+
+  it("reset-learning needs an enrolled profile", async () => {
+    const { bag, savedProfiles } = makeLearningEnv({ profile: undefined });
+    await handleVoiceCommand("speaker reset-learning", ctxFor(bag.notified), bag.env);
+    assert.ok(bag.notified.some((n) => /not enrolled/.test(n.message)));
+    assert.equal(savedProfiles.length, 0);
+  });
+
+  it("status shows learning off when disabled", async () => {
+    const { bag } = makeLearningEnv();
+    bag.prefs.speakerLearn = false;
+    await handleVoiceCommand("status", ctxFor(bag.notified), bag.env);
+    const text = bag.notified.map((n) => n.message).join("\n");
+    assert.ok(text.includes("learning off"), text);
+  });
+
+  it("help mentions learning controls", async () => {
+    const { env, notified } = makeEnv();
+    await handleVoiceCommand("help", ctxFor(notified), env);
+    const text = notified.map((n) => n.message).join("\n");
+    assert.ok(text.includes("that-was-me"), text);
+    assert.ok(text.includes("reset-learning"), text);
+    assert.ok(text.includes("learn on|off"), text);
   });
 });

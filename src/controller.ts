@@ -17,6 +17,7 @@ import { analyzePcm, LevelMeter, meterBar } from "./level.ts";
 import { MicError } from "./mic.ts";
 import { createSpeechChunker, type SpeechChunker } from "./speech-text.ts";
 import { resolveTtsModelId, resolveTtsVoiceId, ttsProviderOf } from "./preferences.ts";
+import { adaptProfile, learnedCount, type SpeakerProfile } from "./speaker.ts";
 import type { SttEndInfo, SttHandlers, Utterance } from "./stt.ts";
 import { DEFAULT_TTS_MODEL, type Speech } from "./tts.ts";
 import type { Endpointer, EndpointerEvents } from "./vad.ts";
@@ -54,18 +55,33 @@ export type ControllerDeps = {
   createEndpointer: (modelPath: string, events: EndpointerEvents) => Endpointer;
   /** Owner-voice gate. All optional; when absent (or check off / no profile) capture behaves as before. */
   getSpeakerCheck?: () => VoicePreferences["speakerCheck"];
-  getSpeakerProfile?: () => { centroid: ArrayLike<number>; suggestedThreshold: number } | undefined;
+  getSpeakerProfile?: () => SpeakerProfile | undefined;
   getSpeakerEmbed?: () => ((pcm: Buffer) => { length: number; [index: number]: number }) | undefined;
   createSpeakerGate?: (opts: {
     embed: (pcm: Buffer) => { length: number; [index: number]: number };
-    profile: { centroid: ArrayLike<number>; suggestedThreshold: number };
+    profile: SpeakerProfile;
     threshold: number;
   }) => {
     push(pcm: Buffer): void;
     decision(): "accept" | "reject" | "pending";
-    finalize(): { decision: "accept" | "reject" | "insufficient"; score?: number; speechMs: number };
+    finalize(): {
+      decision: "accept" | "reject" | "insufficient";
+      score?: number;
+      speechMs: number;
+      embedding?: { length: number; [index: number]: number };
+    };
+    lastEmbedding?(): { length: number; [index: number]: number } | undefined;
     reset(): void;
   };
+  /** Fold one accepted sample into the owner profile. Defaults to adaptProfile; inject a fake in tests. */
+  adaptSpeaker?: (
+    profile: SpeakerProfile,
+    sample: { embedding: Float32Array; score: number; speechMs: number; threshold: number },
+  ) => { profile: SpeakerProfile; adapted: boolean; reason: string };
+  /** Receive the adapted in-memory profile after learning. */
+  setSpeakerProfile?: (profile: SpeakerProfile) => void;
+  /** Persist the adapted profile; called debounced, plus on stop/shutdown flush. */
+  saveSpeakerProfile?: (profile: SpeakerProfile) => Promise<void>;
   log?: (event: string, data?: Record<string, unknown>) => void;
   playErrorCue?: () => void;
   noSpeechMs?: number;
@@ -93,6 +109,10 @@ export const FAILURE_NOTIFY_DEDUP_MS = 60_000;
 export const MIC_RESTART_BACKOFFS_MS = [1000, 2000, 4000] as const;
 export const ZERO_PCM_WARN_BYTES = 3 * 16000 * 2;
 export const TRANSIENT_STATUS_MS = 2000;
+/** At most one learned-profile persist per window; flush on stop/shutdown. */
+export const LEARN_SAVE_DEBOUNCE_MS = 30_000;
+/** Rejected-utterance embeddings are kept for correction only this long. */
+export const REJECT_KEEP_MS = 120_000;
 
 export function defaultPlayCue(): void {
   try {
@@ -149,9 +169,30 @@ export class VoiceController {
   private speakerGate: {
     push(pcm: Buffer): void;
     decision(): "accept" | "reject" | "pending";
-    finalize(): { decision: "accept" | "reject" | "insufficient"; score?: number; speechMs: number };
+    finalize(): {
+      decision: "accept" | "reject" | "insufficient";
+      score?: number;
+      speechMs: number;
+      embedding?: { length: number; [index: number]: number };
+    };
+    lastEmbedding?(): { length: number; [index: number]: number } | undefined;
     reset(): void;
   } | null = null;
+  /** Accept threshold in use for the armed utterance (reported to adaptProfile). */
+  private gateThreshold = 0;
+  /** Scored accept sample awaiting an actual submission; consumed one-shot. */
+  private acceptedVoice: {
+    embedding: Float32Array;
+    score: number;
+    speechMs: number;
+    threshold: number;
+  } | null = null;
+  /** Last rejected utterance's embedding, for `/voice speaker that-was-me`. */
+  private lastRejectedVoice: { embedding: Float32Array; atMs: number } | null = null;
+  /** Adapted profile awaiting debounced persist. */
+  private learnDirty: SpeakerProfile | null = null;
+  private lastLearnSaveAt = 0;
+  private learnSaveTimer: unknown = null;
   private lastPartial = "";
   private meter = new LevelMeter();
   private lastStatusAt = 0;
@@ -298,6 +339,7 @@ export class VoiceController {
     this.generation++;
     this.clearTimer();
     await this.stopQuiet();
+    await this.flushSpeakerLearning();
     this.setPhase("off", "voice off");
   }
 
@@ -305,6 +347,8 @@ export class VoiceController {
     this.modelAbort?.abort();
     this.modelAbort = null;
     this.submitted = false;
+    // An in-flight utterance never submitted, so it must never be learned.
+    this.acceptedVoice = null;
     this.clearNoSpeechTimer();
     this.clearMicTimer();
     this.closeEndpointer();
@@ -328,12 +372,14 @@ export class VoiceController {
   async shutdown(): Promise<void> {
     if (this.closed) {
       await this.stopQuiet().catch(() => undefined);
+      await this.flushSpeakerLearning();
       return;
     }
     this.closed = true;
     this.generation++;
     this.clearTimer();
     await this.stopQuiet().catch(() => undefined);
+    await this.flushSpeakerLearning();
     this.phase = "off";
     this.host.setStatus(undefined);
   }
@@ -457,7 +503,12 @@ export class VoiceController {
       if (this.speakerGate && this.speechHeard) {
         this.speakerGate.push(chunk);
         if (this.speakerGate.decision() === "reject") {
-          this.rejectSpeakerUtterance(undefined, 0, "mid");
+          this.rejectSpeakerUtterance(
+            undefined,
+            0,
+            "mid",
+            this.speakerGate.lastEmbedding?.() as Float32Array | undefined,
+          );
           return;
         }
       }
@@ -575,13 +626,31 @@ export class VoiceController {
     const gate = this.speakerGate;
     if (!gate || this.submitted) return true;
     if (gate.decision() === "reject") {
-      this.rejectSpeakerUtterance(undefined, 0, when);
+      this.rejectSpeakerUtterance(
+        undefined,
+        0,
+        when,
+        gate.lastEmbedding?.() as Float32Array | undefined,
+      );
       return false;
     }
     const result = gate.finalize();
     if (result.decision === "reject") {
-      this.rejectSpeakerUtterance(result.score, result.speechMs, when);
+      this.rejectSpeakerUtterance(
+        result.score,
+        result.speechMs,
+        when,
+        result.embedding as Float32Array | undefined,
+      );
       return false;
+    }
+    if (result.decision === "accept" && result.score !== undefined && result.embedding) {
+      this.acceptedVoice = {
+        embedding: result.embedding as Float32Array,
+        score: result.score,
+        speechMs: result.speechMs,
+        threshold: this.gateThreshold,
+      };
     }
     this.log("speaker", { decision: result.decision, score: result.score, speechMs: result.speechMs, when });
     this.speakerGate = null;
@@ -657,12 +726,14 @@ export class VoiceController {
 
   private maybeArmSpeakerGate(): void {
     this.speakerGate = null;
+    this.acceptedVoice = null;
     try {
       if ((this.deps.getSpeakerCheck?.() ?? "off") === "off") return;
       const profile = this.deps.getSpeakerProfile?.();
       const embed = this.deps.getSpeakerEmbed?.();
       if (!profile || !embed || !this.deps.createSpeakerGate) return;
       const threshold = speakerThresholdFor(profile.suggestedThreshold, this.deps.getSpeakerCheck?.() ?? "normal");
+      this.gateThreshold = threshold;
       this.speakerGate = this.deps.createSpeakerGate({ embed, profile, threshold });
     } catch {
       this.speakerGate = null;
@@ -670,8 +741,15 @@ export class VoiceController {
   }
 
   /** Cancel the in-flight utterance as a non-owner voice: nothing submitted, cue, transient notice. */
-  private rejectSpeakerUtterance(score: number | undefined, speechMs: number, when: "mid" | "end"): void {
+  private rejectSpeakerUtterance(
+    score: number | undefined,
+    speechMs: number,
+    when: "mid" | "end",
+    embedding?: Float32Array,
+  ): void {
     this.log("speaker", { decision: "reject", score, speechMs, when });
+    this.acceptedVoice = null;
+    this.lastRejectedVoice = embedding ? { embedding, atMs: this.now() } : null;
     this.submitted = true;
     this.clearNoSpeechTimer();
     this.closeUtterance();
@@ -691,15 +769,118 @@ export class VoiceController {
     if (after) void after.close().catch(() => undefined);
   }
 
+  /**
+   * Fold one accepted+submitted utterance into the owner voice profile.
+   * Runs after the prompt is sent and never gates it: adaptation is a pure
+   * in-memory step and persistence is fire-and-forget (debounced, flushed on
+   * stop/shutdown). Only the debug log records the outcome, as numbers.
+   */
+  private maybeLearnVoice(): void {
+    const sample = this.acceptedVoice;
+    this.acceptedVoice = null;
+    if (!sample) return;
+    let learnOn = true;
+    try {
+      learnOn = this.deps.getPrefs().speakerLearn ?? true;
+    } catch {
+      learnOn = true;
+    }
+    if (!learnOn) return;
+    const current = this.deps.getSpeakerProfile?.() as SpeakerProfile | undefined;
+    if (!current || typeof current.dim !== "number" || typeof current.suggestedThreshold !== "number") return;
+    const adapt = this.deps.adaptSpeaker ?? adaptProfile;
+    let result: { profile: SpeakerProfile; adapted: boolean; reason: string };
+    try {
+      result = adapt(current, sample);
+    } catch {
+      return;
+    }
+    let learned = 0;
+    try {
+      learned = learnedCount(result.profile);
+    } catch {
+      learned = 0;
+    }
+    this.log("speaker-learn", { reason: result.reason, learned });
+    if (!result.adapted) return;
+    try {
+      this.deps.setSpeakerProfile?.(result.profile);
+    } catch {
+      // In-memory sync is best-effort; the debounced save still persists.
+    }
+    this.learnDirty = result.profile;
+    this.scheduleLearnSave();
+  }
+
+  private scheduleLearnSave(): void {
+    if (!this.learnDirty || !this.deps.saveSpeakerProfile) return;
+    if (this.now() - this.lastLearnSaveAt >= LEARN_SAVE_DEBOUNCE_MS) {
+      this.persistLearned();
+      return;
+    }
+    if (this.learnSaveTimer !== null) return;
+    const delay = LEARN_SAVE_DEBOUNCE_MS - (this.now() - this.lastLearnSaveAt);
+    this.learnSaveTimer = this.timers.set(() => {
+      this.learnSaveTimer = null;
+      this.persistLearned();
+    }, delay);
+  }
+
+  private persistLearned(): void {
+    const profile = this.learnDirty;
+    this.learnDirty = null;
+    if (!profile || !this.deps.saveSpeakerProfile) return;
+    this.lastLearnSaveAt = this.now();
+    void this.deps.saveSpeakerProfile(profile).catch(() => undefined);
+  }
+
+  /** Persist any debounced learning immediately. Called on voice off and session shutdown. */
+  async flushSpeakerLearning(): Promise<void> {
+    if (this.learnSaveTimer !== null) {
+      this.timers.clear(this.learnSaveTimer);
+      this.learnSaveTimer = null;
+    }
+    const profile = this.learnDirty;
+    this.learnDirty = null;
+    if (!profile || !this.deps.saveSpeakerProfile) return;
+    this.lastLearnSaveAt = this.now();
+    try {
+      await this.deps.saveSpeakerProfile(profile);
+    } catch {
+      // Persistence is best-effort; the in-memory profile already updated.
+    }
+  }
+
+  /** Last rejected utterance's embedding, for `/voice speaker that-was-me`. Expires after 2 minutes. */
+  getSpeakerCorrectionCandidate(): Float32Array | undefined {
+    const entry = this.lastRejectedVoice;
+    if (!entry) return undefined;
+    if (this.now() - entry.atMs > REJECT_KEEP_MS) {
+      this.lastRejectedVoice = null;
+      return undefined;
+    }
+    return entry.embedding;
+  }
+
+  /** Drop the stored rejection (consumed by that-was-me). */
+  clearSpeakerCorrectionCandidate(): void {
+    this.lastRejectedVoice = null;
+  }
+
   private submitText(clean: string, mode: string): void {
     const busy = !this.host.isIdle();
     this.log("delivery", { mode, followUp: busy, length: clean.length });
+    let sent = false;
     try {
       if (busy) this.host.sendUserMessage(clean, { deliverAs: "followUp" });
       else this.host.sendUserMessage(clean);
+      sent = true;
     } catch (err) {
       this.host.notify(`Voice submit failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
+    // Learning runs after submission and never gates it: a slow or failing
+    // persist must not delay the prompt. Only actually-sent text is learned.
+    if (sent) this.maybeLearnVoice();
     (this.deps.playCue ?? defaultPlayCue)();
     this.closeUtterance();
     if (!this.closed) this.setPhase("wake", "🎙 listening");
@@ -710,13 +891,16 @@ export class VoiceController {
     if (draft === "") return false;
     const busy = !this.host.isIdle();
     this.log("delivery", { mode: "draft", followUp: busy, length: draft.length });
+    let sent = false;
     try {
       if (busy) this.host.sendUserMessage(draft, { deliverAs: "followUp" });
       else this.host.sendUserMessage(draft);
       this.setEditorText("");
+      sent = true;
     } catch (err) {
       this.host.notify(`Voice submit failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
+    if (sent) this.maybeLearnVoice();
     (this.deps.playCue ?? defaultPlayCue)();
     this.closeUtterance();
     if (!this.closed) this.setPhase("wake", "🎙 listening");
@@ -724,6 +908,8 @@ export class VoiceController {
   }
 
   private finishBlank(partialFallback: boolean): void {
+    // No transcript was submitted, so there is nothing to learn.
+    this.acceptedVoice = null;
     this.closeUtterance();
     this.playErrorCue();
     this.log("stt-end", partialFallback ? { reason: "blank", source: "partial-fallback" } : { reason: "blank" });
@@ -783,13 +969,16 @@ export class VoiceController {
         }
         const busy = !this.host.isIdle();
         this.log("delivery", { mode: "review-send", followUp: busy, length: combined.length });
+        let sent = false;
         try {
           if (busy) this.host.sendUserMessage(combined, { deliverAs: "followUp" });
           else this.host.sendUserMessage(combined);
           this.setEditorText("");
+          sent = true;
         } catch (err) {
           this.host.notify(`Voice submit failed: ${err instanceof Error ? err.message : String(err)}`, "error");
         }
+        if (sent) this.maybeLearnVoice();
         (this.deps.playCue ?? defaultPlayCue)();
         this.closeUtterance();
         if (!this.closed) this.setPhase("wake", "🎙 listening");
@@ -828,6 +1017,8 @@ export class VoiceController {
     this.clearNoSpeechTimer();
     this.closeEndpointer();
     this.closeUtterance();
+    // The utterance failed, so nothing was submitted and nothing is learned.
+    this.acceptedVoice = null;
     this.log("failure", { code: f.code, messageLength: f.message.length, retryable: f.retryable });
     if (
       !f.retryable ||

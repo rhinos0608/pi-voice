@@ -9,6 +9,7 @@ import type { SttEndInfo, SttHandlers } from "../src/stt.ts";
 import type { EndpointerEvents } from "../src/vad.ts";
 import type { WakeGroup } from "../src/wake.ts";
 import type { VoiceFailure } from "../src/contracts.ts";
+import type { SpeakerProfile } from "../src/speaker.ts";
 
 type FakeSource = {
   onPcm: ((chunk: Buffer) => void) | null;
@@ -1055,7 +1056,15 @@ describe("speaker gate", () => {
     const evaluateAfter = opts.evaluateAfterPushes ?? 2;
     let verdict: "accept" | "reject" | undefined;
     h.deps.getSpeakerCheck = () => "normal";
-    h.deps.getSpeakerProfile = () => ({ centroid: [1, 0], suggestedThreshold: 0.75 });
+    h.deps.getSpeakerProfile = () => ({
+      version: 1 as const,
+      model: "/tmp/speaker.onnx",
+      dim: 2,
+      centroid: [1, 0],
+      enrolledAt: "2026-01-02T00:00:00.000Z",
+      enrollScores: [0.9, 0.9, 0.9, 0.9],
+      suggestedThreshold: 0.75,
+    });
     h.deps.getSpeakerEmbed = () => () => {
       state.embedCalls++;
       return { length: 2, 0: 1, 1: 0 };
@@ -1159,5 +1168,267 @@ describe("speaker gate", () => {
       h.utterances[0].handlers.onFinal("normal words");
       assert.deepEqual(h.host.sent[0], { text: "normal words", opts: undefined });
     }
+  });
+});
+
+describe("speaker learning", () => {
+  type GateHarness = ReturnType<typeof makeHarness>;
+
+  function learnProfile(): SpeakerProfile {
+    return {
+      version: 1,
+      model: "/tmp/speaker.onnx",
+      dim: 2,
+      centroid: [1, 0],
+      enrolledAt: "2026-01-02T00:00:00.000Z",
+      enrollScores: [0.92, 0.88, 0.9, 0.91, 0.89],
+      suggestedThreshold: 0.7,
+      anchors: [[1, 0]],
+      learned: [],
+    };
+  }
+
+  /** Gate fake that reports a scored embedding, plus learning persistence capture. */
+  function armLearningGate(
+    h: GateHarness,
+    opts: {
+      finalDecision?: "accept" | "reject" | "insufficient";
+      score?: number;
+      speechMs?: number;
+      embedding?: Float32Array;
+    } = {},
+  ): { saves: SpeakerProfile[]; current: () => SpeakerProfile } {
+    const box = { profile: learnProfile() };
+    const saves: SpeakerProfile[] = [];
+    const embedding = opts.embedding ?? new Float32Array([1, 0]);
+    h.deps.getSpeakerCheck = () => "normal";
+    h.deps.getSpeakerProfile = () => box.profile;
+    h.deps.getSpeakerEmbed = () => () => ({ length: 2, 0: 1, 1: 0 });
+    h.deps.createSpeakerGate = () => ({
+      push: (_pcm: Buffer): void => {},
+      decision: (): "accept" | "reject" | "pending" => "pending",
+      finalize: (): {
+        decision: "accept" | "reject" | "insufficient";
+        score?: number;
+        speechMs: number;
+        embedding?: Float32Array;
+      } => ({
+        decision: opts.finalDecision ?? "accept",
+        score: opts.score ?? 1.0,
+        speechMs: opts.speechMs ?? 2500,
+        ...(opts.finalDecision === "insufficient" ? {} : { embedding }),
+      }),
+      reset: (): void => {},
+      lastEmbedding: (): Float32Array | undefined =>
+        opts.finalDecision === "insufficient" ? undefined : embedding,
+    });
+    h.deps.setSpeakerProfile = (p) => {
+      box.profile = p;
+    };
+    h.deps.saveSpeakerProfile = async (p) => {
+      saves.push(p);
+    };
+    return { saves, current: () => box.profile };
+  }
+
+  async function submitAccepted(h: GateHarness, text = "owner words here"): Promise<void> {
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    h.endpointers[0].end(1.3);
+    assert.equal(h.utterances[0].commits, 1);
+    h.utterances[0].handlers.onFinal(text);
+  }
+
+  it("learns on accepted+submitted and persists immediately", async () => {
+    const h = makeHarness({});
+    const { saves, current } = armLearningGate(h);
+    await submitAccepted(h);
+    assert.deepEqual(h.host.sent[0], { text: "owner words here", opts: undefined });
+    assert.equal(current().learned?.length, 1);
+    assert.equal(saves.length, 1);
+    assert.equal(saves[0]?.learned?.length, 1);
+    const learnLogs = h.logs.filter((l) => l.event === "speaker-learn");
+    assert.equal(learnLogs.length, 1);
+    assert.deepEqual(learnLogs[0]?.data, { reason: "learned", learned: 1 });
+  });
+
+  it("does not learn without an accepted embedding (insufficient)", async () => {
+    const h = makeHarness({});
+    const { saves, current } = armLearningGate(h, { finalDecision: "insufficient" });
+    await submitAccepted(h);
+    assert.equal(h.host.sent.length, 1);
+    assert.equal(current().learned?.length ?? 0, 0);
+    assert.equal(saves.length, 0);
+    assert.ok(!h.logs.some((l) => l.event === "speaker-learn"));
+  });
+
+  it("does not learn on rejection but keeps the embedding for correction", async () => {
+    const h = makeHarness({});
+    const { saves } = armLearningGate(h, { finalDecision: "reject", score: 0.4 });
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    h.endpointers[0].end(1.3);
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(saves.length, 0);
+    const candidate = h.controller.getSpeakerCorrectionCandidate();
+    assert.ok(candidate instanceof Float32Array);
+    h.utterances[0].handlers.onFinal("impostor words");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(saves.length, 0);
+  });
+
+  it("does not learn on STT failure", async () => {
+    const h = makeHarness({});
+    const { saves } = armLearningGate(h);
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    h.endpointers[0].end(1.3);
+    h.utterances[0].handlers.onFailure({ code: "network", message: "STT broke", retryable: true });
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(saves.length, 0);
+    assert.ok(!h.logs.some((l) => l.event === "speaker-learn"));
+  });
+
+  it("does not learn on blank transcripts", async () => {
+    const h = makeHarness({});
+    const { saves } = armLearningGate(h);
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    h.endpointers[0].end(1.3);
+    h.utterances[0].handlers.onFinal("   ");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(saves.length, 0);
+  });
+
+  it("does not learn on a failed send", async () => {
+    const h = makeHarness({});
+    const { saves } = armLearningGate(h);
+    h.host.sendUserMessage = () => {
+      throw new Error("boom");
+    };
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    h.endpointers[0].end(1.3);
+    h.utterances[0].handlers.onFinal("owner words here");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(saves.length, 0);
+  });
+
+  it("does not learn when capture is stopped or restarted before submit", async () => {
+    const stopped = makeHarness({});
+    const stoppedLearn = armLearningGate(stopped);
+    await stopped.controller.start();
+    stopped.detectors[0].fire();
+    stopped.endpointers[0].start(0.5);
+    stopped.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    stopped.endpointers[0].end(1.3);
+    await stopped.controller.stop();
+    stopped.utterances[0].handlers.onFinal("late words");
+    assert.equal(stopped.host.sent.length, 0);
+    assert.equal(stoppedLearn.saves.length, 0);
+
+    const restarted = makeHarness({});
+    const restartedLearn = armLearningGate(restarted);
+    await restarted.controller.start();
+    restarted.detectors[0].fire();
+    restarted.endpointers[0].start(0.5);
+    await restarted.controller.restartIfListening();
+    restarted.utterances[0].handlers.onFinal("stale words");
+    assert.equal(restarted.host.sent.length, 0);
+    assert.equal(restartedLearn.saves.length, 0);
+  });
+
+  it("review dictation without send does not learn; trailing send does", async () => {
+    const h = makeHarness({ prefs: { sendMode: "review" } });
+    const { saves } = armLearningGate(h);
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    h.endpointers[0].end(1.3);
+    h.utterances[0].handlers.onFinal("take notes");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.host.editor, "take notes");
+    assert.equal(saves.length, 0);
+    h.detectors[0].fire();
+    h.endpointers[1].start(0.5);
+    h.sources[0].emit(Buffer.from([5, 6, 7, 8]));
+    h.endpointers[1].end(1.4);
+    h.utterances[1].handlers.onFinal("more words send to pi");
+    assert.deepEqual(h.host.sent[0], { text: "take notes more words", opts: undefined });
+    assert.equal(saves.length, 1);
+  });
+
+  it("learning disabled skips adaptation", async () => {
+    const h = makeHarness({ prefs: { speakerLearn: false } });
+    const { saves, current } = armLearningGate(h);
+    await submitAccepted(h);
+    assert.equal(h.host.sent.length, 1);
+    assert.equal(current().learned?.length ?? 0, 0);
+    assert.equal(saves.length, 0);
+    assert.ok(!h.logs.some((l) => l.event === "speaker-learn"));
+  });
+
+  it("persistence is debounced and flushed on stop", async () => {
+    const h = makeHarness({});
+    const { saves, current } = armLearningGate(h);
+    await submitAccepted(h, "first");
+    assert.equal(saves.length, 1);
+    h.detectors[0].fire();
+    h.endpointers[1].start(0.5);
+    h.sources[0].emit(Buffer.from([5, 6, 7, 8]));
+    h.endpointers[1].end(1.4);
+    h.utterances[1].handlers.onFinal("second");
+    assert.equal(h.host.sent.length, 2);
+    assert.equal(current().learned?.length, 2);
+    assert.equal(saves.length, 1);
+    await h.controller.stop();
+    assert.equal(saves.length, 2);
+    assert.equal(saves[1]?.learned?.length, 2);
+  });
+
+  it("slow persistence never delays submission", async () => {
+    const h = makeHarness({});
+    armLearningGate(h);
+    h.deps.saveSpeakerProfile = () => new Promise<never>(() => {});
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    h.endpointers[0].end(1.3);
+    h.utterances[0].handlers.onFinal("owner words here");
+    assert.deepEqual(h.host.sent[0], { text: "owner words here", opts: undefined });
+  });
+
+  it("rejected embeddings expire after two minutes", async () => {
+    const h = makeHarness({});
+    armLearningGate(h, { finalDecision: "reject", score: 0.4 });
+    await h.controller.start();
+    h.detectors[0].fire();
+    h.endpointers[0].start(0.5);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    h.endpointers[0].end(1.3);
+    assert.ok(h.controller.getSpeakerCorrectionCandidate() instanceof Float32Array);
+    h.advance(119_000);
+    assert.ok(h.controller.getSpeakerCorrectionCandidate() instanceof Float32Array);
+    h.advance(2_000);
+    assert.equal(h.controller.getSpeakerCorrectionCandidate(), undefined);
+  });
+
+  it("no correction candidate without a rejection", async () => {
+    const h = makeHarness({});
+    armLearningGate(h);
+    await submitAccepted(h);
+    assert.equal(h.controller.getSpeakerCorrectionCandidate(), undefined);
   });
 });

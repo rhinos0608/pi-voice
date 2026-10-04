@@ -27,6 +27,8 @@ export type VoicePreferences = {
   isolation: boolean;
   /** Owner-voice check strictness. Effective only when a speaker profile is enrolled. */
   speakerCheck: "off" | "low" | "normal" | "high";
+  /** Learn the owner voice from accepted+submitted utterances. Default on. */
+  speakerLearn: boolean;
 };
 
 export const DEFAULT_PREFERENCES: VoicePreferences = {
@@ -41,6 +43,7 @@ export const DEFAULT_PREFERENCES: VoicePreferences = {
   sendMode: "auto",
   isolation: true,
   speakerCheck: "normal",
+  speakerLearn: true,
 };
 
 /** Threshold offset applied to profile.suggestedThreshold per strictness level. */
