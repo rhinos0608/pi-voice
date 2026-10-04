@@ -42,9 +42,11 @@ sh research/other-audio/build-bundled-tap-probe.sh --duration=10
 ```
 
 This builds `TapProbe.app` (`CFBundleIdentifier local.pi-voice.tap-probe`,
-with `NSAudioCaptureUsageDescription`) in `/tmp`, ad-hoc codesigns it, and
-launches it via `open -W -n`. The app writes stats to a temp file that the
-script prints when the app exits (stdout is invisible under `open`).
+with `NSAudioCaptureUsageDescription`) inside a private temp directory the
+script creates and owns (it prints the exact path), ad-hoc codesigns it, and
+launches it via `open -W -n`. The app writes stats to a file inside that same
+directory, which the script prints when the app exits (stdout is invisible
+under `open`).
 
 - **Dialogs to expect:** on first run, a system prompt like
   *"TapProbe would like to capture audio"* (wording varies). Click **Allow**.
@@ -95,7 +97,10 @@ when nothing plays (re-run your winner once with the video paused to check).
   ```
   (`tccutil reset` without a bundle id resets that service for *everything* —
   avoid that unless you mean it.)
-- **Cleanup:** `rm -rf /tmp/TapProbe.app /tmp/tap-probe /tmp/sck-probe`.
+- **Cleanup:** the bundled-tap script prints the exact command for its own
+  temp directory and stats file at the end of the run (it never touches a
+  fixed path). The two compiled probes are separate:
+  `rm -f /tmp/tap-probe /tmp/sck-probe`.
 
 ## Files
 
