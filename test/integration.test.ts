@@ -1129,7 +1129,48 @@ describe("speaker gate", () => {
     assert.equal(h.controller.getPhase(), "wake");
     assert.equal(h.host.sent.length, 0);
     assert.equal(h.utterances[0].commits, 0);
+    assert.equal(h.host.statuses.at(-1), "\uD83C\uDF99 not your voice");
     assert.ok(h.logs.some((l) => l.event === "speaker" && l.data?.["decision"] === "reject" && l.data?.["score"] === 0.4));
+  });
+
+  it("unverified reject shows the unverified cue and stores no correction candidate", async () => {
+    const h = makeHarness({});
+    const errorCues = h.errorCues();
+    h.deps.getSpeakerCheck = () => "normal";
+    h.deps.getSpeakerProfile = () => ({
+      version: 1 as const,
+      model: "/tmp/speaker.onnx",
+      dim: 2,
+      centroid: [1, 0],
+      enrolledAt: "2026-01-02T00:00:00.000Z",
+      enrollScores: [0.9, 0.9, 0.9, 0.9],
+      suggestedThreshold: 0.75,
+    });
+    h.deps.getSpeakerEmbed = () => () => ({ length: 2, 0: 1, 1: 0 });
+    h.deps.createSpeakerGate = () => ({
+      push: (_pcm: Buffer): void => {},
+      decision: (): "accept" | "reject" | "pending" => "pending",
+      finalize: (): { decision: "accept" | "reject" | "insufficient"; score?: number; speechMs: number; reason?: "unverified" } => ({
+        decision: "reject",
+        reason: "unverified",
+        speechMs: 1500,
+      }),
+      reset: (): void => {},
+    });
+    await captureWithSpeech(h);
+    h.sources[0].emit(Buffer.from([1, 2, 3, 4]));
+    h.endpointers[0].end(1.3);
+    assert.equal(h.controller.getPhase(), "wake");
+    assert.equal(h.host.sent.length, 0);
+    assert.equal(h.utterances[0].commits, 0);
+    assert.equal(h.errorCues(), errorCues + 1);
+    assert.equal(h.host.statuses.at(-1), "\uD83C\uDF99 couldn't verify your voice \u2014 try a shorter request");
+    assert.equal(h.controller.getSpeakerCorrectionCandidate(), undefined);
+    assert.ok(h.logs.some((l) => l.event === "speaker" && l.data?.["decision"] === "reject" && l.data?.["reason"] === "unverified"));
+    h.fireMs(2000);
+    assert.equal(h.host.statuses.at(-1), "\uD83C\uDF99 listening");
+    h.utterances[0].handlers.onFinal("late unverified words");
+    assert.equal(h.host.sent.length, 0);
   });
 
   it("finalize accept and insufficient proceed to submit", async () => {

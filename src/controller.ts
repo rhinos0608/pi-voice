@@ -69,6 +69,7 @@ export type ControllerDeps = {
       score?: number;
       speechMs: number;
       embedding?: { length: number; [index: number]: number };
+      reason?: "unverified";
     };
     lastEmbedding?(): { length: number; [index: number]: number } | undefined;
     reset(): void;
@@ -176,6 +177,7 @@ export class VoiceController {
       score?: number;
       speechMs: number;
       embedding?: { length: number; [index: number]: number };
+      reason?: "unverified";
     };
     lastEmbedding?(): { length: number; [index: number]: number } | undefined;
     reset(): void;
@@ -644,6 +646,7 @@ export class VoiceController {
         result.speechMs,
         when,
         result.embedding as Float32Array | undefined,
+        result.reason,
       );
       return false;
     }
@@ -747,16 +750,22 @@ export class VoiceController {
     }
   }
 
-  /** Cancel the in-flight utterance as a non-owner voice: nothing submitted, cue, transient notice. */
+  /** Cancel the in-flight utterance as a non-owner voice: nothing submitted, cue, transient notice.
+   * An "unverified" reject means the embedding budget ran out with unscored
+   * speech: it was never scored as the owner, so the last-rejected embedding
+   * is not stored for a later that-was-me correction. */
   private rejectSpeakerUtterance(
     score: number | undefined,
     speechMs: number,
     when: "mid" | "end",
     embedding?: Float32Array,
+    reason?: "unverified",
   ): void {
-    this.log("speaker", { decision: "reject", score, speechMs, when });
+    this.log("speaker", { decision: "reject", score, speechMs, when, ...(reason ? { reason } : {}) });
     this.acceptedVoice = null;
-    this.lastRejectedVoice = embedding ? { embedding, atMs: this.now() } : null;
+    // A scored reject leaves its embedding for a later that-was-me correction.
+    // Unverified audio was never scored as the owner, so store nothing.
+    this.lastRejectedVoice = reason === "unverified" || !embedding ? null : { embedding, atMs: this.now() };
     this.submitted = true;
     this.clearNoSpeechTimer();
     this.closeUtterance();
@@ -764,7 +773,11 @@ export class VoiceController {
     this.playErrorCue();
     if (this.closed) return;
     const gen = this.generation;
-    this.setPhase("wake", "\uD83C\uDF99 not your voice");
+    const unverified = reason === "unverified";
+    this.setPhase(
+      "wake",
+      unverified ? "\uD83C\uDF99 couldn't verify your voice \u2014 try a shorter request" : "\uD83C\uDF99 not your voice",
+    );
     this.later(() => {
       if (!this.closed && gen === this.generation && this.phase === "wake") this.host.setStatus("\uD83C\uDF99 listening");
     }, TRANSIENT_STATUS_MS);
