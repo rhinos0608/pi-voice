@@ -123,6 +123,22 @@ Workflow `d1d262b8-430b-483d-a8eb-f1617f40efd5`, 5 researcher reports in subagen
   Core Audio process taps + permission; permission-free process-output signals; reference-based wake suppression/AEC). Next: write a plan,
   confirm product choices (hold vs toggle, key, global vs focused, contaminated-utterance behaviour), then delegate by file ownership.
   Any hardware test that plays audible sound needs the owner's OK first.
+- Research findings (reports 1fd2c9ad scout, 66c7563b hotkey, d856481a other-audio):
+  - PTT: Carbon `RegisterEventHotKey` gives press+release globally with NO TCC permission; needs main thread + NSApplication loop.
+    Default ⌃⌥Space. Modifier-only keys (Fn/Right Option) need CGEventTap + Input Monitoring for the terminal app. Superwhisper and
+    MacWhisper use Carbon.
+  - Apple VP AEC cancels ONLY its own output bus, not other apps. No external-reference input exists. Other-app rejection needs a reference
+    stream: process tap (kTCCServiceAudioCapture; reportedly all-zero buffers from a bare terminal-spawned CLI; reportedly conflicts with VPIO
+    in the same process) or ScreenCaptureKit audio (Screen & System Audio Recording permission, ~50-150 ms latency, monthly reminders).
+    Plan: run a second KWS on the reference and drop mic wakes that coincide. Full dictation cleanup would need WebRTC AEC3 (high effort).
+  - BUG (parent-verified): native/voice-io.swift ~291-293 mutates a copy of voiceProcessingOtherAudioDuckingConfiguration and never
+    assigns it back, so DEFAULT ducking turned the owner's media down whenever the helper ran. There is no "off" level; min is the lowest.
+- Owner has NOT yet confirmed my stated assumptions: hold-to-talk; global ⌃⌥Space; ignore wake words the Mac itself plays; when other
+  audio plays during dictation, cancel it or stage the transcript in the editor instead of auto-send.
+- Workflow `afdac225-21ff-4784-9ac3-a4ff12965ced`: stage 1 parallel ducking-fix (voice-io.swift), hotkey-helper (native/hotkey.swift,
+  src/hotkey.ts, test/hotkey.test.ts), other-audio-probe (research/other-audio/, compile only, NOT run). Stage 2 ptt-wiring
+  (controller/contracts/prefs/commands/index/README/tests; speakerCheck default off). Stage 3 review. Then: verify, fix, commit. Then ask
+  the owner to run the other-audio probes while THEY play a video (permission prompts appear), then build reference-KWS coincidence rejection.
 
 ## Next steps (superseded by the decision above)
 
