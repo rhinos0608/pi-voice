@@ -7,6 +7,7 @@ import { VoiceController, type ControllerDeps, type VoiceHost } from "../src/con
 import { MicError } from "../src/mic.ts";
 import type { SttEndInfo, SttHandlers } from "../src/stt.ts";
 import type { EndpointerEvents } from "../src/vad.ts";
+import { feedVadSpeechFrame } from "../src/vad.ts";
 import type { WakeGroup } from "../src/wake.ts";
 import type { VoiceFailure } from "../src/contracts.ts";
 import type { SpeakerProfile } from "../src/speaker.ts";
@@ -1618,5 +1619,49 @@ describe("speaker learning", () => {
     armLearningGate(h);
     await submitAccepted(h);
     assert.equal(h.controller.getSpeakerCorrectionCandidate(), undefined);
+  });
+});
+
+describe("VAD framing parity (enrollment vs live gate)", () => {
+  /** Scripted endpointer: opens VAD on the speechStartAt-th push, closes on the speechEndAt-th push. */
+  function scripted(open: { value: boolean }, startAt: number, endAt: number): { push(): void } {
+    let pushes = 0;
+    return {
+      push(): void {
+        pushes++;
+        if (pushes === startAt) open.value = true;
+        if (pushes === endAt) open.value = false;
+      },
+    };
+  }
+
+  it("identical frame sequences select identical frames in both paths", () => {
+    const frames = ["f0", "f1", "f2", "f3", "f4", "f5", "f6"].map((s) => Buffer.from(s));
+    const startAt = 3; // speech-start trigger frame (1-based push index)
+    const endAt = 6; // speech-end trigger frame (1-based push index)
+
+    // Enrollment path (src/index.ts): push through the endpointer first, then keep the frame when open.
+    const enrollOpen = { value: false };
+    const enrollEp = scripted(enrollOpen, startAt, endAt);
+    const enrolled: string[] = [];
+    for (const frame of frames) {
+      if (feedVadSpeechFrame(enrollEp, frame, () => enrollOpen.value)) {
+        enrolled.push(frame.toString());
+      }
+    }
+
+    // Live-gate path (src/controller.ts): same helper, same order.
+    const gateOpen = { value: false };
+    const gateEp = scripted(gateOpen, startAt, endAt);
+    const gated: string[] = [];
+    for (const frame of frames) {
+      if (feedVadSpeechFrame(gateEp, frame, () => gateOpen.value)) {
+        gated.push(frame.toString());
+      }
+    }
+
+    assert.deepEqual(enrolled, gated);
+    // Boundary rule: the speech-start trigger frame is included, the speech-end trigger frame is excluded.
+    assert.deepEqual(enrolled, ["f2", "f3", "f4"]);
   });
 });

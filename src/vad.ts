@@ -22,6 +22,22 @@ export type VadLike = {
 export type EndpointerDeps = { createVad?: (config: unknown, bufferSizeInSeconds: number) => VadLike };
 export type Endpointer = { push(frame: Buffer): void; reset(): void; close(): void; readonly inSpeech: boolean };
 
+/**
+ * Push one frame through the endpointer, then report whether VAD speech is
+ * open. Both enrollment (index.ts) and the live gate (controller.ts) must
+ * use this order — update the VAD-open flag from the endpointer first, then
+ * decide whether this frame is speech — so the speech-start trigger frame is
+ * included and the speech-end trigger frame is excluded in both paths.
+ */
+export function feedVadSpeechFrame(
+  endpointer: Pick<Endpointer, "push">,
+  frame: Buffer,
+  isSpeechOpen: () => boolean,
+): boolean {
+  endpointer.push(frame);
+  return isSpeechOpen();
+}
+
 function defaultCreateVad(config: unknown, bufferSizeInSeconds: number): VadLike {
   const req = createRequire(import.meta.url);
   // eslint-disable-next-line @typescript-eslint/no-require-imports

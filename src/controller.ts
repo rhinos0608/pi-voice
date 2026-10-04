@@ -20,7 +20,7 @@ import { resolveTtsModelId, resolveTtsVoiceId, ttsProviderOf } from "./preferenc
 import { adaptProfile, learnedCount, type SpeakerProfile } from "./speaker.ts";
 import type { SttEndInfo, SttHandlers, Utterance } from "./stt.ts";
 import { DEFAULT_TTS_MODEL, type Speech } from "./tts.ts";
-import type { Endpointer, EndpointerEvents } from "./vad.ts";
+import { feedVadSpeechFrame, type Endpointer, type EndpointerEvents } from "./vad.ts";
 import type { WakeDetector, WakeGroup } from "./wake.ts";
 
 /** Narrow host surface the controller needs from Pi (adapted in index.ts). */
@@ -504,7 +504,13 @@ export class VoiceController {
       } catch {
         // Ignore push errors; STT failure paths report on their own.
       }
-      if (this.speakerGate && this.vadSpeechOpen) {
+      let speechFrame = false;
+      try {
+        if (this.endpointer) speechFrame = feedVadSpeechFrame(this.endpointer, chunk, () => this.vadSpeechOpen);
+      } catch {
+        // VAD must never break the capture.
+      }
+      if (this.speakerGate && speechFrame) {
         this.speakerGate.push(chunk);
         if (this.speakerGate.decision() === "reject") {
           this.rejectSpeakerUtterance(
@@ -515,11 +521,6 @@ export class VoiceController {
           );
           return;
         }
-      }
-      try {
-        this.endpointer?.push(chunk);
-      } catch {
-        // VAD must never break the capture.
       }
       try {
         this.meter.push(chunk);

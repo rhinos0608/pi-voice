@@ -111,8 +111,9 @@ Both default on and degrade gracefully when their build artifacts are missing.
 isolation` is on (default) and the helper is built, capture and TTS playback
 both run through one native helper process (`native/voice-io.swift`, compiled
 to `~/Library/Application Support/pi-voice/bin/`) using Apple's voice
-processing: echo cancellation of pi-voice's own playback, noise suppression,
-and automatic gain control. This replaces the ffmpeg mic and ffplay sink for
+processing: echo cancellation of pi-voice's own playback and noise
+suppression. Automatic gain control is available via the helper's `--agc`
+flag but stays off by default because level swings hurt speaker embeddings. This replaces the ffmpeg mic and ffplay sink for
 the session. Notes:
 
 - Echo cancellation covers **only pi-voice's own playback** (TTS spoken

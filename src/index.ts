@@ -24,7 +24,7 @@ import { keyStatus, inworldKeyStatus, loadPreferences, resolveTtsKey, resolveTts
 import { startUtterance } from "./stt.ts";
 import { startSpeech, type StartSpeechOptions } from "./tts.ts";
 import { startInworldSpeech } from "./inworld-tts.ts";
-import { createEndpointer, type EndpointerEvents } from "./vad.ts";
+import { createEndpointer, feedVadSpeechFrame, type EndpointerEvents } from "./vad.ts";
 import { createWakeDetector, type WakeGroup } from "./wake.ts";
 import {
   getVoiceCompletions,
@@ -387,13 +387,14 @@ export default function voiceExtension(pi: ExtensionAPI): void {
         .start(
           (chunk) => {
             if (done) return;
+            let speechFrame = false;
             try {
-              endpointer.push(chunk);
+              speechFrame = feedVadSpeechFrame(endpointer, chunk, () => vadOpen);
             } catch {
               finishOk();
               return;
             }
-            if (vadOpen) {
+            if (speechFrame) {
               chunks.push(chunk);
               speechBytes += chunk.length;
             }
